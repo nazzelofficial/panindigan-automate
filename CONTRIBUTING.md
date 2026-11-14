@@ -10,7 +10,7 @@ We welcome bug fixes, performance improvements, documentation updates, and proto
 
 ### Prerequisites
 
-- **Node.js 20 LTS or newer** (Node 22 LTS recommended)
+- **Node.js 22 LTS or newer** (Node 26 LTS recommended)
 - **npm** (included with Node.js)
 - A local code editor with TypeScript support (VS Code, Cursor, Neovim, etc.)
 

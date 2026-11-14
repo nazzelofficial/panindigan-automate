@@ -20,7 +20,7 @@ We take the security of this project and the safety of user sessions seriously. 
 Instead, please report it through one of the following channels:
 
 1. **GitHub Private Vulnerability Reporting**: Use the **"Report a vulnerability"** button under the repository's [Security](../../security) tab (recommended).
-2. **Direct Maintainer Contact**: If GitHub advisories are unavailable, email the maintainers directly at `security@panindigan.dev` (or open an issue requesting a private security contact channel without details).
+2. **Direct Maintainer Contact**: If GitHub advisories are unavailable, email the maintainers directly at `security@panindigan.com` (or open an issue requesting a private security contact channel without details).
 
 ### What to Include in Your Report
 
