@@ -27,10 +27,10 @@ It is not a fork, wrapper, or port of any existing Messenger library. It targets
 
 ```bash
 # pnpm (Recommended)
-pnpm install panindigan-automate
+pnpm add panindigan-automate
 
 # Bun
-bun install panindigan-automate
+bun add panindigan-automate
 
 # npm
 npm install panindigan-automate
