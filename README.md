@@ -413,19 +413,17 @@ Read this section before putting a bot in production.
 
 ## Documentation
 
-| Section | Contents |
-|---------|----------|
-| [Quick start](#quick-start) | Install to working bot, step by step |
-| [Authentication](#authentication) | All six formats, cookie refresh, session persistence |
-| [Events](#events) | Strongly typed events and payload structures |
-| [API Reference](#api) | Every public method with signatures and examples |
-| [Configuration](#configuration) | Customizing transports, log levels, timeouts |
-| [Error Handling](#error-handling) | Error hierarchy, codes, and recovery |
-| [Middleware](#middleware) | Hook types, contexts, ordering, scoping |
-| [Plugins](#plugins) | Interface, lifecycle, context, publishing |
-| [Diagnostics](#diagnostics) | In-memory metrics, request counters, health snapshots |
-| [Protocol Notes](#protocol-notes) | Internal architecture, LS tasks, GraphQL docs |
-| [Examples](examples/) | Ready-to-run bot scripts |
+| Guide | Description |
+| :--- | :--- |
+| [Quick Start](docs/quick-start.md) | Install to a running echo bot in under 5 minutes |
+| [Authentication](docs/authentication.md) | The 6 credential formats, cookie refresh, and 2FA |
+| [API Reference](docs/api-reference.md) | Complete signatures, parameter tables, and examples |
+| [Middleware](docs/middleware.md) | Intercepting, modifying, and logging operations |
+| [Plugins](docs/plugins.md) | Building and packaging modular extensions |
+| [Migration](docs/migration.md) | Transitioning from legacy/unmaintained FCA libraries |
+| [Troubleshooting](docs/troubleshooting.md) | Error codes, diagnostics, and debugging |
+| [FAQ](docs/faq.md) | Common questions, ban prevention, and deployment |
+| [Examples](examples/) | Ready-to-run bot scripts (echo bot, group manager) |
 
 ## Contributing
 
