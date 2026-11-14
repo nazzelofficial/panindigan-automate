@@ -1,14 +1,16 @@
 # Panindigan Automate
 
-[![Node.js](https://img.shields.io/badge/node.js-%3E%3D20-339933)](https://nodejs.org/en/about/previous-releases)
+[![Node.js](https://img.shields.io/badge/node.js-%3E%3D22%20(rec%20v26)-339933)](https://nodejs.org/)
+[![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9%20(recommended)-orange)](https://pnpm.io)
+[![Bun](https://img.shields.io/badge/Bun-%3E%3D1.1-f472b6)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Facebook Messenger automation for Node.js, written from scratch in strict TypeScript.
+Facebook Messenger automation for Node.js and Bun, written from scratch in strict TypeScript. Built with care by [**Nazzel**](https://github.com/nazzelofficial) for bot developers.
 
 Panindigan Automate drives a personal Messenger account the same way the web client does — over Facebook's HTTP endpoints and a persistent MQTT-over-WebSocket connection — and wraps it in a typed, promise-based API. You can send, edit, unsend, and forward messages; react; manage threads, groups, participants, and admins; upload and download attachments; create and vote in polls; track presence, typing, and read receipts; and listen to every realtime event as it happens.
 
-It is not a fork, wrapper, or port of any existing Messenger library. It targets Node.js 20 LTS and newer, ships dual ESM/CJS builds with bundled type declarations, and treats strictness — compile-time and runtime — as a design constraint rather than a preference: no `any` in the source, no stubs, no unvalidated external input, and discriminated unions on every event payload.
+It is not a fork, wrapper, or port of any existing Messenger library. It targets **Node.js 22 LTS and Node.js 26** (Node.js 26 recommended) as well as **Bun (>= 1.1)**, ships dual ESM/CJS builds with bundled type declarations, and treats strictness — compile-time and runtime — as a design constraint rather than a preference: no `any` in the source, no stubs, no unvalidated external input, and discriminated unions on every event payload.
 
 > *Panindigan* is a Tagalog word meaning "to hold one's ground." The library is named for the part of bot development everyone else leaves to you: keeping a session alive. Panindigan reconnects after drops, refreshes cookies before they expire, queues outbound packets while offline, and persists session state across restarts.
 
@@ -16,12 +18,19 @@ It is not a fork, wrapper, or port of any existing Messenger library. It targets
 
 ## Requirements
 
-- **Node.js 20 LTS or newer** (22 LTS recommended). This is a server-side library — no browser, Deno, or Bun support in this release.
+- **Node.js 22 LTS or newer** (Node.js 26 recommended) or **Bun >= 1.1**. Node.js 20 has reached End-of-Life and is no longer supported.
 - Credentials from a logged-in Facebook session (see [Authentication](#authentication)). There is no email/password login, by design.
 
 ## Installation
 
 ```bash
+# pnpm (Recommended)
+pnpm install panindigan-automate
+
+# Bun
+bun install panindigan-automate
+
+# npm
 npm install panindigan-automate
 ```
 
@@ -397,7 +406,7 @@ Read this section before putting a bot in production.
 - **This is an unofficial library.** Panindigan Automate talks to private, undocumented endpoints. Automating a personal account violates Facebook's terms of service, and accounts that do it can be restricted or disabled. Use an account you can afford to lose.
 - **The wire format changes without notice.** When Facebook breaks a parser, fixes ship as patch releases. Anything that changes this library's public API ships as a minor release until 1.0, a major release after.
 - **Pre-1.0.** This is a pre-1.0 release. Pin your version; expect the API to tighten before it freezes.
-- **Node only.** No browser, Deno, or Bun in this release. No wildcard event listeners either — each listener names an exact event.
+- **Runtimes.** Node.js 22, Node.js 26 (recommended), and Bun (>= 1.1) are fully supported. Browser and Deno environments are not supported.
 - **No email/password login.** By design — password login trips Facebook's automation detection far faster than cookie-based sessions do.
 
 ## Documentation
@@ -417,6 +426,10 @@ Read this section before putting a bot in production.
 ## Contributing
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Every change needs tests; every public API change needs docs; every bug fix gets a regression test that stays in the suite. Bug reports and feature requests can use the GitHub issue templates.
+
+## Author
+
+Created and maintained by [**Nazzel** (@nazzelofficial)](https://github.com/nazzelofficial) for bot developers everywhere.
 
 ## License
 

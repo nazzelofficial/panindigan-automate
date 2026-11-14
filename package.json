@@ -9,13 +9,24 @@
     "automation",
     "mqtt",
     "chatbot",
-    "facebook-messenger"
+    "facebook-messenger",
+    "messenger-bot",
+    "chat-automation",
+    "bun",
+    "typescript",
+    "node26"
   ],
+  "author": {
+    "name": "Nazzel",
+    "url": "https://github.com/nazzelofficial"
+  },
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0",
+    "bun": ">=1.1.0"
   },
+  "packageManager": "pnpm@12.16.1",
   "main": "./dist/cjs/index.js",
   "module": "./dist/esm/index.js",
   "types": "./dist/types/index.d.ts",
@@ -26,12 +37,26 @@
       "require": "./dist/cjs/index.js"
     }
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nazzelofficial/panindigan-automate.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nazzelofficial/panindigan-automate/issues"
+  },
+  "homepage": "https://github.com/nazzelofficial/panindigan-automate#readme",
+  "publishConfig": {
+    "access": "public"
+  },
   "sideEffects": false,
   "files": [
     "dist",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "SECURITY.md",
+    "CONTRIBUTING.md",
+    "CODE_OF_CONDUCT.md"
   ],
   "scripts": {
     "build": "node build.mjs",
