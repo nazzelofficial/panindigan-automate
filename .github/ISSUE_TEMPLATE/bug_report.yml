@@ -1,0 +1,53 @@
+name: Bug Report
+description: Report an issue or unexpected behavior in panindigan-automate
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please do not include sensitive credentials (such as your `c_user`, `xs`, or `datr` cookies) in your issue description or logs.
+  - type: input
+    id: version
+    attributes:
+      label: Panindigan Automate Version
+      placeholder: e.g. 0.1.2
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime & Environment
+      options:
+        - Node.js 26
+        - Node.js 22
+        - Bun (>= 1.1)
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: e.g. Ubuntu 24.04, Windows 11, macOS Sequoia
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the Bug
+      description: A clear and concise description of what the issue is.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Code or Steps
+      description: A minimal reproducible example showing how to trigger the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Log Output
+      description: Please mask any session tokens, cookie values, or personal Facebook IDs.
+      render: shell

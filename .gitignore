@@ -4,9 +4,12 @@ dist/
 # Dependencies
 node_modules/
 
-# Session state written by the file storage adapter during local runs
+# Session state and credential files (prevent accidental commit)
 panindigan-session/
 *.session.json
+appstate*.json
+cookies*.json
+fb-*.json
 
 # Test artifacts
 coverage/

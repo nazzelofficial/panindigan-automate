@@ -1,0 +1,29 @@
+name: Feature Request
+description: Propose a new feature, improvement, or API enhancement
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make Panindigan Automate better? Let us know what you'd like to see!
+  - type: textarea
+    id: problem
+    attributes:
+      label: Is your feature request related to a problem?
+      description: A clear and concise description of what the limitation or challenge is.
+    validations:
+      required: false
+  - type: textarea
+    id: solution
+    attributes:
+      label: Describe the Solution You'd Like
+      description: A clear description of the new API, method, or behavior you want added.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternative Solutions or Workarounds
+      description: Any alternative ways or workarounds you've considered.
+    validations:
+      required: false

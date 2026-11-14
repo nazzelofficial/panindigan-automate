@@ -4,6 +4,8 @@
 [![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9%20(recommended)-orange)](https://pnpm.io)
 [![Bun](https://img.shields.io/badge/Bun-%3E%3D1.1-f472b6)](https://bun.sh)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6)](https://www.typescriptlang.org/)
+[![CI](https://github.com/nazzelofficial/panindigan-automate/actions/workflows/ci.yml/badge.svg)](https://github.com/nazzelofficial/panindigan-automate/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/panindigan-automate.svg)](https://www.npmjs.com/package/panindigan-automate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Facebook Messenger automation for Node.js and Bun, written from scratch in strict TypeScript. Built with care by [**Nazzel**](https://github.com/nazzelofficial) for bot developers.
@@ -411,17 +413,19 @@ Read this section before putting a bot in production.
 
 ## Documentation
 
-| Document | Contents |
-|----------|----------|
-| [Quick start](docs/quick-start.md) | Install to working bot, step by step |
-| [Authentication](docs/authentication.md) | All six formats, cookie refresh, session persistence |
-| [API reference](docs/api-reference.md) | Every public method with signatures and examples |
-| [Middleware](docs/middleware.md) | Hook types, contexts, ordering, scoping |
-| [Plugins](docs/plugins.md) | Interface, lifecycle, context, publishing |
-| [Migration](docs/migration.md) | Moving from other Messenger libraries |
-| [Troubleshooting](docs/troubleshooting.md) | Error codes, common failure modes, diagnostics |
-| [FAQ](docs/faq.md) | Common questions |
-| [Examples](docs/examples/) | Echo bot, group manager, file sender, poll creator |
+| Section | Contents |
+|---------|----------|
+| [Quick start](#quick-start) | Install to working bot, step by step |
+| [Authentication](#authentication) | All six formats, cookie refresh, session persistence |
+| [Events](#events) | Strongly typed events and payload structures |
+| [API Reference](#api) | Every public method with signatures and examples |
+| [Configuration](#configuration) | Customizing transports, log levels, timeouts |
+| [Error Handling](#error-handling) | Error hierarchy, codes, and recovery |
+| [Middleware](#middleware) | Hook types, contexts, ordering, scoping |
+| [Plugins](#plugins) | Interface, lifecycle, context, publishing |
+| [Diagnostics](#diagnostics) | In-memory metrics, request counters, health snapshots |
+| [Protocol Notes](#protocol-notes) | Internal architecture, LS tasks, GraphQL docs |
+| [Examples](examples/) | Ready-to-run bot scripts |
 
 ## Contributing
 
