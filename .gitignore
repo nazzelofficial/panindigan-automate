@@ -1,0 +1,24 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+
+# Session state written by the file storage adapter during local runs
+panindigan-session/
+*.session.json
+
+# Test artifacts
+coverage/
+
+# Environment files with credentials
+.env
+.env.*
+
+# Logs
+*.log
+
+# Editor noise
+.vscode/
+.idea/
+*.swp
