@@ -11,7 +11,7 @@
 export const LIBRARY_NAME = "panindigan-automate";
 
 /** Library version. Mirrors package.json. */
-export const VERSION = "0.1.2";
+export const VERSION = "0.1.3";
 
 /**
  * Default User-Agent: a reduced Chrome UA string. The major version is kept
@@ -233,7 +233,7 @@ export const REACTION_EMOJI = {
 export const REQUIRED_COOKIES = ["c_user", "xs", "datr"] as const;
 
 /** Cookie domain used for all Facebook requests. */
-export const FB_COOKIE_DOMAIN = ".facebook.com";
+export const FB_COOKIE_DOMAIN = "facebook.com";
 
 /** Facebook URLs the cookie jar is scoped to. */
 export const FB_COOKIE_URLS = [

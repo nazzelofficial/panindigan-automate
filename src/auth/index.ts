@@ -359,7 +359,9 @@ function toToughCookie(cookie: NormalizedCookie): Cookie {
   return new Cookie({
     key: cookie.name,
     value: cookie.value,
-    domain: cookie.domain,
+    // tough-cookie expects the canonical domain (no leading dot). AppState
+    // exports carry ".facebook.com" which tough-cookie rejects silently.
+    domain: cookie.domain.replace(/^\.+/, ""),
     path: cookie.path,
     expires: cookie.expiresAtMs === null ? null : new Date(cookie.expiresAtMs),
     hostOnly: cookie.hostOnly,

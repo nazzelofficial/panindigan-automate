@@ -6,6 +6,8 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6)](https://www.typescriptlang.org/)
 [![CI](https://github.com/nazzelofficial/panindigan-automate/actions/workflows/ci.yml/badge.svg)](https://github.com/nazzelofficial/panindigan-automate/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/panindigan-automate.svg)](https://www.npmjs.com/package/panindigan-automate)
+[![npm downloads](https://img.shields.io/npm/dm/panindigan-automate.svg)](https://www.npmjs.com/package/panindigan-automate)
+[![npm total downloads](https://img.shields.io/npm/dt/panindigan-automate.svg)](https://www.npmjs.com/package/panindigan-automate)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Facebook Messenger automation for Node.js and Bun, written from scratch in strict TypeScript. Built with care by [**Nazzel**](https://github.com/nazzelofficial) for bot developers.
@@ -50,7 +52,7 @@ Type declarations and source maps are included; there is no `@types` package to 
 
 ## Quick start
 
-An echo bot — install to first reply in about 15 lines:
+An echo bot in about 15 lines:
 
 ```ts
 import { MessengerClient } from "panindigan-automate";
@@ -362,7 +364,7 @@ Plugins run in a sandboxed context: a child logger, namespaced cache and storage
 
 ## Logging
 
-Logging is structured JSON on stdout by default, one child logger per module. It's also safe by default: cookie values, tokens, and AppState are redacted at every level before anything is written — you can point production logs at an aggregator without scrubbing them first.
+Logging is structured JSON on stdout by default, one child logger per module. It is also safe by default: cookie values, tokens, and AppState are redacted at every level before anything is written — you can point production logs at an aggregator without scrubbing them first.
 
 For local development:
 
@@ -383,7 +385,7 @@ console.log(snapshot.mqtt.heartbeat.avgMs, snapshot.mqtt.queue.depth);
 console.log(snapshot.cache.hitRate, snapshot.events.throughput);
 ```
 
-HTTP counts and latency percentiles, retries, MQTT heartbeat round-trip and reconnect count, queue depth, cache hit rate, per-event emission counts, and process memory — collected since startup or the last `diagnostics.reset()`.
+HTTP counts and latency percentiles, retries, MQTT heartbeat round-trip times and reconnect count, queue depth, cache hit rate, per-event emission counts, and process memory — collected since startup or the last `diagnostics.reset()`.
 
 ## Protocol notes
 

@@ -236,12 +236,72 @@ function extractIrisSeqId(html: string): number | null {
   return null;
 }
 
+/**
+ * Extracts `fb_dtsg` from any of the known boot-payload patterns Facebook
+ * has used across different surface generations.
+ *
+ * Priority order (most-to-least current):
+ *   1. `"DTSGInitialData",[],{"token":"…"}` — modern requireLazy SPA format
+ *   2. `"DTSGInitData",[],{"token":"…"}`    — older variant (pre-2024)
+ *   3. Relaxed scan: `DTSGInit*Data` near `"token"` within 160 chars
+ *   4. `fb_dtsg" value="…"`                 — legacy server-rendered form field
+ *   5. `"async_get_token":"…"`               — async-loaded variant
+ */
+function extractFbDtsg(html: string): string | undefined {
+  // 1. Modern requireLazy: ["DTSGInitialData",[],"token":"…"}
+  let m = html.match(/"DTSGInitialData"\s*,\s*\[\s*\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  // 2. Older key variant
+  m = html.match(/"DTSGInitData"\s*,\s*\[\s*\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  // 3. Relaxed scan — key anywhere before "token" within 160 chars
+  m = html.match(/DTSGInit(?:ial)?Data[^}]{0,160}?"token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  // 4. Server-rendered hidden input (name before value and vice-versa)
+  m = html.match(/name="fb_dtsg"\s+value="([^"]+)"/) ?? html.match(/value="([^"]+)"\s+name="fb_dtsg"/);
+  if (m?.[1]) return m[1];
+  // 5. async_get_token variant
+  m = html.match(/"async_get_token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  return undefined;
+}
+
+/**
+ * Extracts the `lsd` token from the boot payload.
+ * Facebook embeds this in the `requireLazy("LSD", …)` call.
+ */
+function extractLsd(html: string): string | undefined {
+  // 1. requireLazy array — `["LSD",[],{"token":"…"},…]`
+  let m = html.match(/\["LSD"\s*,\s*\[\s*\]\s*,\s*\{\s*"token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  // 2. Relaxed scan — "LSD" key near "token" within 80 chars
+  m = html.match(/"LSD"[^}]{0,80}?"token"\s*:\s*"([^"]+)"/);
+  if (m?.[1]) return m[1];
+  // 3. Server-rendered hidden input
+  m = html.match(/name="lsd"\s+value="([^"]+)"/) ?? html.match(/value="([^"]+)"\s+name="lsd"/);
+  if (m?.[1]) return m[1];
+  return undefined;
+}
+
+/**
+ * Returns a human-readable, non-sensitive diagnostic object describing which
+ * tokens were absent when extraction failed. No cookie or token values are
+ * included — only boolean presence flags and metadata.
+ */
+function diagnoseScrapeFailure(html: string): Record<string, unknown> {
+  return {
+    fbDtsgFound: extractFbDtsg(html) !== undefined,
+    lsdFound: extractLsd(html) !== undefined,
+    hasLoginForm: html.includes('id="loginform"'),
+    hasCheckpoint: /checkpoint|two_step_verification/i.test(html),
+    bodyLength: html.length,
+  };
+}
+
 /** Scrapes the session tokens Facebook embeds in `home.php`. */
 function scrapeTokens(html: string, userId: string): ScrapedTokens | null {
-  const dtsgMatch = html.match(/DTSGInitialData.*?token":"(.*?)"/) ?? html.match(/name="fb_dtsg" value="(.*?)"/);
-  const lsdMatch = html.match(/\["LSD",\[\],\{"token":"(.*?)"\}/) ?? html.match(/name="lsd" value="(.*?)"/);
-  const fbDtsg = dtsgMatch?.[1];
-  const lsd = lsdMatch?.[1];
+  const fbDtsg = extractFbDtsg(html);
+  const lsd = extractLsd(html);
   if (fbDtsg === undefined || lsd === undefined) {
     return null;
   }
@@ -1471,21 +1531,55 @@ export class MessengerClient {
 
   async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
     const response = await http.get("login", `${FB_BASE_URL}/home.php`);
-    if (response.url.includes("/login") || response.body.includes('id="loginform"')) {
+    // Detect session-expired and checkpoint redirects without exposing raw HTML.
+    const isLoginPage =
+      response.url.includes("/login") ||
+      response.url.includes("/checkpoint") ||
+      response.url.includes("/two_step_verification") ||
+      response.body.includes('id="loginform"') ||
+      /"checkpoint"/.test(response.body) ||
+      /"CHECKPOINT"/.test(response.body);
+    if (isLoginPage) {
+      const isCheckpoint =
+        response.url.includes("/checkpoint") ||
+        response.url.includes("/two_step_verification") ||
+        /"checkpoint"/i.test(response.body);
       throw new AuthenticationError(
-        "Facebook rejected the session and redirected to the login page",
+        isCheckpoint
+          ? "Facebook requires a security checkpoint — log in via a browser to clear it"
+          : "Facebook rejected the session and redirected to the login page",
         "AUTH_SESSION_EXPIRED",
-        { retryable: false, context: { operation: "login", url: response.url } },
+        {
+          retryable: false,
+          context: {
+            operation: "login",
+            url: response.url,
+            isCheckpoint,
+          },
+        },
       );
     }
     const tokens = scrapeTokens(response.body, this.#requireUserId());
     if (tokens === null) {
+      // Include non-sensitive diagnostics to help diagnose which token was absent.
+      const diag = diagnoseScrapeFailure(response.body);
+      this.#logger.debug(
+        { operation: "login", ...diag },
+        "token scrape failed — see context for which tokens were missing",
+      );
       throw new AuthenticationError(
         "Could not read Facebook's session tokens from the home page",
         "AUTH_LOGIN_REJECTED",
-        { retryable: false, context: { operation: "login" } },
+        {
+          retryable: false,
+          context: { operation: "login", ...diag },
+        },
       );
     }
+    this.#logger.debug(
+      { operation: "login", region: tokens.region, hasIrisSeqId: tokens.irisSeqId !== null },
+      "session tokens scraped",
+    );
     return tokens;
   }
 
@@ -1541,20 +1635,26 @@ export class MessengerClient {
   async #refreshCookies(): Promise<void> {
     const http = this.#requireHttp();
     const response = await http.get("cookieRefresh", `${FB_BASE_URL}/home.php`);
-    if (response.url.includes("/login")) {
+    const isExpiredPage =
+      response.url.includes("/login") ||
+      response.url.includes("/checkpoint") ||
+      response.url.includes("/two_step_verification") ||
+      response.body.includes('id="loginform"');
+    if (isExpiredPage) {
       this.#handleSessionExpired("expired");
       throw new AuthenticationError(
-        "Facebook redirected the session to the login page during cookie refresh",
+        "Facebook redirected the session during cookie refresh",
         "AUTH_SESSION_EXPIRED",
-        { retryable: true, context: { operation: "cookieRefresh" } },
+        { retryable: true, context: { operation: "cookieRefresh", url: response.url } },
       );
     }
     const tokens = scrapeTokens(response.body, this.#requireUserId());
     if (tokens === null) {
+      const diag = diagnoseScrapeFailure(response.body);
       throw new AuthenticationError(
         "Could not refresh Facebook's session tokens",
         "AUTH_LOGIN_REJECTED",
-        { retryable: true, context: { operation: "cookieRefresh" } },
+        { retryable: true, context: { operation: "cookieRefresh", ...diag } },
       );
     }
     this.#applyTokens(tokens);

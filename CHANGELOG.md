@@ -10,6 +10,25 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
+## [0.1.3] - 2026-11-15
+
+### Added
+
+- `tests/scrape-tokens.test.ts` — regression tests with hand-crafted, sanitized fixtures (no real Facebook HTML or credentials): modern requireLazy SPA boot payloads, older `DTSGInitData` variants, relaxed scans, server-rendered hidden inputs, the `async_get_token` variant, special characters in token values, and failure pages (login page, checkpoint, empty/unknown). The suite covers both the `fb_dtsg` and `lsd` extractors and the login page detection.
+- `tests/cookie-store.test.ts` — regression tests for the AppState → HTTP jar pipeline: `CookieStore.fromCookies` accepts browser-exported AppState cookies, `requireAuthenticated()` passes, and the jar emits a `Cookie` header for `www.facebook.com` for `c_user`/`xs`/`datr`/`presence`.
+- `scripts/` patch helpers are now ESM (`.mjs`) instead of CommonJS.
+
+### Fixed
+
+- **Facebook authentication failure** — `AuthenticationError: Could not read Facebook's session tokens from the home page`:
+  - `scrapeTokens` extracts `fb_dtsg` with multiple patterns instead of one pair of legacy regexes: modern requireLazy `DTSGInitialData`, older `DTSGInitData`, a relaxed scan within 160 characters, server-rendered hidden inputs, and `async_get_token`.
+  - `lsd` is extracted the same multi-pattern way: requireLazy `["LSD",[],{"token":"…"}]`, a relaxed scan, and server-rendered hidden inputs.
+  - `#scrapeTokens` and `#refreshCookies` now classify the response: login redirects (`/login`, `id="loginform"`) raise `AUTH_SESSION_EXPIRED`; checkpoint pages (`/checkpoint`, `two_step_verification`) are detected by URL and body markers and route through the same expiry teardown — checkpoints are never bypassed.
+  - Token-scrape failures log and throw with non-sensitive diagnostics only (`fbDtsgFound`, `lsdFound`, `hasLoginForm`, `hasCheckpoint`, `bodyLength`) — never cookie values, token values, or raw HTML.
+  - Successful token scraping now logs a debug line with the detected region/sequence-id presence.
+- **AppState cookies were silently dropped by tough-cookie 6**: browser AppState exports carry `domain: ".facebook.com"` (with a leading dot), which tough-cookie 6 rejects without an error. `FB_COOKIE_DOMAIN` is now the canonical `facebook.com`, and `toToughCookie()` strips leading dots before constructing the `Cookie`. Freshly exported AppState is now actually applied to requests instead of failing at the required-cookie check or silently missing from the `Cookie` header.
+- The previous behavior could present itself as a Facebook login redirect with an "Invalid session token" or a "Could not read session tokens" failure; with the extraction and cookie-jar fixes, a healthy exported session is applied end to end.
+
 ## [0.1.2] - 2026-11-14
 
 ### Added
