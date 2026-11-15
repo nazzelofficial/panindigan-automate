@@ -10,6 +10,15 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
+## [0.1.5] - 2026-11-15
+
+### Fixed
+
+- **The exact production failure observed in the logs** (`status=200 path=/home.php bytes=249`): Facebook's unauthenticated response to `www.facebook.com/home.php` is a tiny JSON error envelope, not a page. Home-page scrapes now send a browser-like `Accept: text/html,...` header so Facebook serves the real page, and the client detects a JSON error envelope via `parseFacebookJson` + `interpretFacebookError` — surfacing the actual Facebook error (e.g. `Not logged in`) instead of the ambiguous "Could not read Facebook's session tokens from the home page".
+- Login and cookie refresh now throw the *real* Facebook error verbatim (code, retryable flag, and message such as `Not logged in`), with the page diagnostic summary appended — no more dead-end authentication errors for this class of response. The same safe diagnostics (`status`, `path`, `bytes`, booleans) appear in the context and in the message itself so they show at any log level, not just `debug`/`trace`.
+- The `Accept` header now distinguishes HTML navigations (`text/html,...`) from API requests, matching what a browser sends — a prerequisite for Facebook serving the HTML shell instead of the JSON envelope.
+- Regression tests for the error-envelope detection (`tests/home.test.ts`); suite passes at 118 tests.
+
 ## [0.1.4] - 2026-11-15
 
 ### Added

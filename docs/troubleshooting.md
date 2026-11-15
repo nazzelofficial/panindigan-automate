@@ -55,7 +55,11 @@ try {
     ```
   - If your hosting provider or ISP throttles WebSocket connections, route the client through a reliable residential or SOCKS5 proxy via the `httpProxy` option.
 
-### 5. `APIError: Facebook rejected the message edit`
+### 5. `AuthenticationError: Facebook rejected the session — Not logged in while calling "home" (status=200 …)` 
+* **Cause**: Facebook's response to `GET /home.php` was not a page at all — it was a tiny JSON error envelope (seen in production as `status=200 path=/home.php bytes=249`), which means the session is not authenticated — or expired/revoked/checkpoint-flagged — at the HTTP layer. The `Accept` header this library now sends (`text/html,...`) will cause Facebook to answer with the real page on newer deployments; older builds sent `*/*` and always got the JSON envelope back.
+* **Fix**: The error now tells you exactly what Facebook answered. Re-export your cookies from a browser where the account is confirmed logged in, switch to a non-restricted account if the current one was flagged, and redeploy. If Facebook still rejects the session on a confirmed-fresh export, the account itself is blocked — no library can bypass that; appeal to Meta, or run the bot from an account Facebook trusts.
+
+### 6. `APIError: Facebook rejected the message edit`
 * **Cause**: Trying to edit a message that:
   - Was sent by another user (you can only edit your own messages).
   - Was sent more than 15 minutes ago (Facebook's native edit window limit).

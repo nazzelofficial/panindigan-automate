@@ -67,6 +67,9 @@ export function safeHomeDiagnostics(
   };
 }
 
+import { interpretFacebookError, parseFacebookJson } from "../transport/http/index.js";
+import type { LibraryError } from "../errors/index.js";
+
 /** One-line, safe summary suitable for log lines and error messages. */
 export function summarizeHomeDiagnostics(diagnostics: HomePageDiagnostics): string {
   return [
@@ -79,4 +82,21 @@ export function summarizeHomeDiagnostics(diagnostics: HomePageDiagnostics): stri
     `loginForm=${diagnostics.hasLoginForm}`,
     `checkpoint=${diagnostics.hasCheckpoint}`,
   ].join(" ");
+}
+
+/**
+ * Detects Facebook's structured JSON error envelope (`{"error":1357001,…}`).
+ *
+ * Unauthenticated requests to `www.facebook.com/home.php` that are not
+ * treated as browser HTML navigations come back as a small JSON error
+ * document instead of a page — an actual response body seen in production.
+ * Returns the mapped `LibraryError` when the body carries one, or `null`
+ * otherwise (e.g. a real HTML page). Never throws.
+ */
+export function extractFacebookApiError(body: string): LibraryError | null {
+  const parsed = parseFacebookJson(body);
+  if (parsed === null) {
+    return null;
+  }
+  return interpretFacebookError("home", parsed);
 }

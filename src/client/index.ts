@@ -53,6 +53,7 @@ import { buildLogMessageForm, buildMessageForm } from "./forms.js";
 import { postGraphQL, postGraphQLBatch, postWebGraphQLMutation, type GraphQLBatchResult } from "./graphql.js";
 import { resolvePhotoUrl, uploadMedia } from "./media.js";
 import {
+  extractFacebookApiError,
   safeHomeDiagnostics,
   summarizeHomeDiagnostics,
 } from "./home.js";
@@ -145,6 +146,10 @@ const EDIT_TASK_LABEL = "742";
 const EDIT_TASK_VERSION = "6903494529735864";
 const EDIT_TASK_QUEUE = "edit_message";
 const TYPING_TASK_VERSION = "5849951561777440";
+
+/** Browser-like Accept header for HTML page scrapes (home.php). */
+const HTML_ACCEPT_HEADER =
+  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
 /** GraphQL document ids not covered by `DOC_IDS`. */
 const GROUP_CREATE_DOC_ID = "577041672419534";
@@ -1519,8 +1524,29 @@ export class MessengerClient {
   }
 
   async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
-    const response = await http.get("login", `${FB_BASE_URL}/home.php`);
+    const response = await http.get("login", `${FB_BASE_URL}/home.php`, {
+      headers: { accept: HTML_ACCEPT_HEADER },
+    });
     const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+
+    // Unauthenticated home.php responses come back as a tiny JSON error
+    // envelope, not a page — surface the actual Facebook error verbatim.
+    const apiError = extractFacebookApiError(response.body);
+    if (apiError !== null) {
+      const summary = summarizeHomeDiagnostics(diag);
+      this.#logger.warn(
+        { operation: "login", code: apiError.code, status: diag.status, bytes: diag.contentLength },
+        "Facebook returned a structured error for the home page",
+      );
+      throw new AuthenticationError(
+        `Facebook rejected the session — ${apiError.message} (${summary})`,
+        apiError.code,
+        {
+          retryable: apiError.retryable,
+          context: { operation: "login", ...diag },
+        },
+      );
+    }
 
     // The logged-out splash screen carries no tokens by design; detect it
     // precisely instead of trying to extract what isn't there.
@@ -1639,8 +1665,23 @@ export class MessengerClient {
 
   async #refreshCookies(): Promise<void> {
     const http = this.#requireHttp();
-    const response = await http.get("cookieRefresh", `${FB_BASE_URL}/home.php`);
+    const response = await http.get("cookieRefresh", `${FB_BASE_URL}/home.php`, {
+      headers: { accept: HTML_ACCEPT_HEADER },
+    });
     const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+
+    const apiError = extractFacebookApiError(response.body);
+    if (apiError !== null) {
+      this.#handleSessionExpired("expired");
+      throw new AuthenticationError(
+        `Facebook rejected the session during cookie refresh — ${apiError.message} (${summarizeHomeDiagnostics(diag)})`,
+        apiError.code,
+        {
+          retryable: apiError.retryable,
+          context: { operation: "cookieRefresh", ...diag },
+        },
+      );
+    }
 
     if (diag.mqttWebConfigEmpty) {
       this.#handleSessionExpired("expired");

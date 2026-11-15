@@ -7,6 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  extractFacebookApiError,
   isLoggedOutHomePage,
   safeHomeDiagnostics,
   summarizeHomeDiagnostics,
@@ -79,5 +80,40 @@ describe("summarizeHomeDiagnostics", () => {
     expect(summary).toContain("status=200");
     expect(summary).toContain("mqttWebConfigEmpty=true");
     expect(summary).toContain("path=/home.php");
+  });
+});
+
+describe("extractFacebookApiError", () => {
+  it("maps Facebook's small unauthenticated error envelope to an AuthenticationError", () => {
+    const error = extractFacebookApiError(
+      '{"error":1357001,"errorSummary":"Not logged in","errorDescription":"Not logged in","errorIsRetryable":false}',
+    );
+
+    expect(error).not.toBeNull();
+    expect(error?.message).toContain("Not logged in");
+    expect(error?.code).toBe("AUTH_LOGIN_REJECTED");
+  });
+
+  it("strips Facebook's anti-hijacking prefix before interpreting", () => {
+    const error = extractFacebookApiError(
+      'for (;;);{"error":1357001,"errorSummary":"Not logged in","errorIsRetryable":false}',
+    );
+
+    expect(error?.message).toContain("Not logged in");
+  });
+
+  it("returns null for HTML pages (they are not API errors)", () => {
+    expect(extractFacebookApiError(LOGGED_OUT_SPLASH)).toBeNull();
+    expect(extractFacebookApiError(AUTHENTICATED_SPA)).toBeNull();
+  });
+
+  it("returns null for JSON payloads without an error marker", () => {
+    expect(extractFacebookApiError('{"ok":true}')).toBeNull();
+  });
+
+  it("maps a checkpoint-ish error envelope to a permission-style error", () => {
+    const error = extractFacebookApiError('{"error":1357031}');
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe("PERMISSION_BLOCKED");
   });
 });
