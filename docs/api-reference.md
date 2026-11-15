@@ -37,22 +37,26 @@ Creates a new `MessengerClient` instance.
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `logLevel` | `string` | `"info"` | Logging severity: `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`, or `"silent"`. |
+| `logLevel` | `string` | `"info"` | `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`, or `"silent"`. |
 | `logFile` | `string \| null` | `null` | Path to append structured log output. |
 | `prettyPrint` | `boolean` | `false` | Pretty-prints console log records (requires `pino-pretty`). |
-| `httpProxy` | `string \| null` | `null` | HTTP or SOCKS5 proxy URL (`http://...`, `https://...`, `socks5://...`). Tunnels both HTTP and MQTT sockets. |
+| `logTransports` | `LogTransport[]` | `[]` | Additional log transports receiving every record. |
+| `httpProxy` | `string \| null` | `null` | HTTP or SOCKS5 proxy URL. Tunnels both HTTP and MQTT sockets. |
 | `httpTimeout` | `number` | `30000` | HTTP request timeout in milliseconds. |
-| `httpRetries` | `number` | `3` | Maximum automatic retries on network failures and 429/5xx responses. |
-| `userAgent` | `string` | *(Modern Chrome)* | User-Agent string sent with HTTP and WebSocket handshakes. |
+| `httpRetries` | `number` | `3` | Automatic retries on network failures and 429/5xx responses. |
+| `httpMaxRedirects` | `number` | `5` | Maximum redirects followed. |
+| `userAgent` | `string` | Chrome 149 reduced UA | User-Agent sent with HTTP and WebSocket handshakes. |
 | `heartbeatInterval` | `number` | `60` | MQTT ping interval in seconds. |
-| `heartbeatTimeout` | `number` | `5` | Maximum seconds to await `PINGRESP` before marking connection dead. |
-| `reconnectAttempts`| `number` | `Infinity` | Maximum reconnect attempts before giving up. |
-| `reconnectDelayMax` | `number` | `30000` | Upper limit in ms for exponential backoff between reconnect sweeps. |
-| `mqttQueueMaxSize` | `number` | `500` | Maximum outgoing MQTT messages buffered while disconnected. |
-| `persistSession` | `boolean` | `true` | Persists session metadata, sequences, and refreshed cookies to storage. |
+| `heartbeatTimeout` | `number` | `5` | Seconds to await `PINGRESP` before marking the connection dead. |
+| `reconnectAttempts` | `number` | `Infinity` | Reconnect attempts before giving up. |
+| `reconnectDelayMax` | `number` | `30000` | Backoff cap in milliseconds. |
+| `mqttQueueMaxSize` | `number` | `500` | Outgoing MQTT messages buffered while disconnected. |
+| `cacheMaxItems` | `number` | `5000` | LRU cache capacity. |
+| `persistSession` | `boolean` | `true` | Persists session metadata, sequences, and refreshed cookies. |
 | `storageAdapter` | `"memory" \| "file" \| StorageAdapter` | `"file"` | Session persistence backend. |
-| `storageDirectory` | `string` | `"./panindigan-session"` | File storage path when using file adapter. |
-| `validateOnLogin` | `boolean` | `true` | Validates session with Facebook before resolving login. |
+| `storageDirectory` | `string` | `"./panindigan-session"` | File storage path for the file adapter. |
+| `validateOnLogin` | `boolean` | `true` | Validates the session with Facebook before resolving `login()`. |
+| `plugins` | `PluginRegistration[]` | `[]` | Plugins registered at construction. |
 
 ---
 
@@ -60,47 +64,30 @@ Creates a new `MessengerClient` instance.
 
 ### `client.login(credentials)`
 
-Authenticates with Facebook using exported browser session cookies, validates credentials, establishes the realtime MQTT connection, and initializes the sync stream.
+Authenticates with Facebook, builds the transports, and resolves once the realtime connection is up.
 
 - **Parameters**:
-  - `credentials`: `string | AppStateCookie[] | AppStateObject | CookieEntry[]` — AppState JSON file path, env var, array, or raw cookie header string.
+  - `credentials`: `Credentials` — AppState array, AppState object, JSON file path, environment variable name, cookie array, or raw cookie header string.
 - **Returns**: `Promise<LoginResult>` — `{ userId: string, restored: boolean }`.
-- **Throws**: `CookieError` if required cookies (`c_user`, `xs`, `datr`) are missing or expired; `AuthenticationError` if Facebook rejects credentials.
+- **Throws**: `CookieError` when `c_user`/`xs`/`datr` are missing or expired; `AuthenticationError` when Facebook rejects the session; `TimeoutError` when the realtime connection does not sync in time.
 
 ```ts
 const { userId, restored } = await client.login("./appstate.json");
-console.log(`Logged in as ${userId} (restored: ${restored})`);
 ```
 
 ### `client.logout()`
 
-Gracefully terminates the session: flushes outgoing queues, sends `/browser_close`, disconnects MQTT, tears down HTTP connection pools, and clears state.
+Ends the session: closes the MQTT transport (publishing `/browser_close`), drains the HTTP pool, and clears persisted session state.
 
 - **Returns**: `Promise<void>`.
 
-```ts
-await client.logout();
-```
-
 ### `client.getSession()`
 
-Returns active, non-sensitive session diagnostics and status.
-
-- **Returns**: `SessionInfo`
-  - `userId`: `string`
-  - `state`: `"UNINITIALIZED" | "AUTHENTICATING" | "ACTIVE" | "RECONNECTING" | "CLOSING" | "CLOSED"`
-  - `connected`: `boolean`
-  - `connectedSince`: `number | null`
-  - `lastSeqId`: `number | null`
-  - `syncToken`: `string | null`
-  - `loginTime`: `number`
-  - `reconnects`: `number`
+Returns non-sensitive session metadata: `userId`, `state`, `connected`, `connectedSince`, `lastSeqId`, `syncToken`, `loginTime`, `reconnects`.
 
 ### `client.isConnected()`
 
-Checks whether the realtime MQTT transport is currently open.
-
-- **Returns**: `boolean`.
+Whether the realtime connection is currently established.
 
 ---
 
@@ -108,120 +95,81 @@ Checks whether the realtime MQTT transport is currently open.
 
 ### `client.sendMessage(threadId, content)`
 
-Sends a message to a 1:1 direct chat or a group chat. Automatically adjusts targeting (`thread_fbid` vs `specific_to_list`).
+Sends text, a sticker, a GIF, or a previously uploaded attachment. Group threads are targeted with `thread_fbid`; direct threads use `specific_to_list`/`other_user_fbid`.
 
 - **Parameters**:
-  - `threadId`: `string` — Recipient user ID or group thread ID.
-  - `content`: `MessageContent` — Text, sticker, GIF, or uploaded attachment.
-- **Returns**: `Promise<MessageSendResult>` — `{ messageId: string, timestamp: number }`.
+  - `threadId`: `string`
+  - `content`: `MessageContent` — `{ type: "text", body, mentions? }`, `{ type: "sticker", stickerId }`, `{ type: "gif", gifId }`, or `{ type: "attachment", attachmentId }`.
+- **Returns**: `Promise<MessageSendResult>` — `{ messageId, threadId, offlineThreadingId }`.
 
 ```ts
-// Plain text
-await client.sendMessage("1000123456789", {
-  type: "text",
-  body: "Hello world!",
-});
+await client.sendMessage("1000123456789", { type: "text", body: "Hello!" });
 
-// Text with @mention
 await client.sendMessage("2000987654321", {
   type: "text",
-  body: "@Alex Welcome to the team!",
+  body: "@Alex Welcome!",
   mentions: [{ id: "1000123456789", tag: "@Alex" }],
 });
 ```
 
 ### `client.sendReply(threadId, messageId, content)`
 
-Sends a reply quoted directly against an existing message.
+Replies to a specific message.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `messageId`: `string`
-  - `content`: `MessageContent`
 - **Returns**: `Promise<MessageSendResult>`.
 
 ```ts
-await client.sendReply(event.threadId, event.id, {
+await client.sendReply(event.threadId, event.messageId, {
   type: "text",
-  body: "This is a direct reply.",
+  body: "This is a reply.",
 });
 ```
 
 ### `client.sendAttachment(threadId, file)`
 
-Uploads a local file or buffer and sends it as an attachment in one operation.
+Uploads a file and sends it as an attachment.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `file`: `FileInput` — `{ path: string }`, `{ buffer: Buffer, filename: string, mimeType?: string }`, or `{ stream: Readable, filename: string }`.
+- **Parameters**: `file`: `FileInput` — filesystem path (`string`), `Buffer`, or Node readable stream.
 - **Returns**: `Promise<MessageSendResult>`.
-
-```ts
-await client.sendAttachment(threadId, { path: "./report.pdf" });
-```
 
 ### `client.sendSticker(threadId, stickerId)`
 
-Sends a sticker by its Facebook sticker ID.
+Sends a sticker by id.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `stickerId`: `string`
 - **Returns**: `Promise<MessageSendResult>`.
 
 ### `client.editMessage(messageId, newBody)`
 
-Edits an already-sent text message via the lightweight-service task queue (`/ls_req` Task 742).
+Edits a message you sent through lightweight-service task `742`. Rejects with `APIError` when Facebook refuses the edit (too old, or not yours).
 
-- **Parameters**:
-  - `messageId`: `string`
-  - `newBody`: `string`
 - **Returns**: `Promise<void>`.
-
-```ts
-await client.editMessage(sent.messageId, "Updated text content.");
-```
 
 ### `client.unsendMessage(messageId)`
 
-Unsends (deletes for everyone) a previously sent message.
+Unsends (deletes for everyone) a message.
 
-- **Parameters**:
-  - `messageId`: `string`
 - **Returns**: `Promise<void>`.
 
 ### `client.forwardMessage(messageId, targetThreadId)`
 
-Forwards the attachments of a cached message to another thread. (Requires the message to be in local cache, e.g. via `client.getMessages`).
+Forwards every attachment of a cached message to another thread. The message must be in the local cache (populated by `message` events and `getMessages`); otherwise a `ValidationError` is thrown.
 
-- **Parameters**:
-  - `messageId`: `string`
-  - `targetThreadId`: `string`
 - **Returns**: `Promise<void>`.
 
 ---
 
 ## Reactions
 
-### `client.setMessageReaction(messageId, reaction)`
+### `client.addReaction(messageId, reaction)`
 
-Adds or updates an emoji reaction on a message via GraphQL mutation `1491398900900362`.
+Adds a reaction. `reaction` accepts a `REACTION_EMOJI` name (`"like"`, `"love"`, `"haha"`, `"wow"`, `"sad"`, `"angry"`) or any emoji character.
 
-- **Parameters**:
-  - `messageId`: `string`
-  - `reaction`: `ReactionInput` — Emoji (`"❤️"`, `"👍"`, `"😆"`, `"😮"`, `"😢"`, `"😠"`) or named reaction (`"heart"`, `"like"`, `"haha"`, `"wow"`, `"sad"`, `"angry"`).
 - **Returns**: `Promise<void>`.
 
-```ts
-await client.setMessageReaction(event.id, "❤️");
-```
+### `client.removeReaction(messageId)`
 
-### `client.removeMessageReaction(messageId)`
+Removes your reaction.
 
-Removes an existing reaction from a message.
-
-- **Parameters**:
-  - `messageId`: `string`
 - **Returns**: `Promise<void>`.
 
 ---
@@ -230,40 +178,27 @@ Removes an existing reaction from a message.
 
 ### `client.uploadMedia(file)`
 
-Uploads a file to Facebook's Mercury media endpoint without immediately sending it.
+Uploads a file to Facebook's CDN.
 
-- **Parameters**:
-  - `file`: `FileInput`
-- **Returns**: `Promise<MediaInfo>` — `{ attachmentId: string, type: AttachmentType, filename: string, size: number, mimeType: string }`.
+- **Parameters**: `file`: `FileInput`.
+- **Returns**: `Promise<MediaInfo>` — `{ attachmentId, filename, mimeType, size, kind }`, where `kind` is `"image" | "gif" | "file" | "video" | "audio"`.
 
 ```ts
-const media = await client.uploadMedia({ path: "./photo.jpg" });
+const media = await client.uploadMedia("./photo.jpg");
 await client.sendMessage(threadId, { type: "attachment", attachmentId: media.attachmentId });
 ```
 
 ### `client.downloadAttachment(attachmentId)`
 
-Downloads an attachment by ID as an in-memory buffer.
-
-- **Parameters**:
-  - `attachmentId`: `string`
-- **Returns**: `Promise<Buffer>`.
+Downloads an attachment into memory as a `Buffer`.
 
 ### `client.streamAttachment(attachmentId)`
 
-Streams an attachment by ID as a Node.js `ReadableStream`.
+Streams an attachment without buffering it. Returns `Promise<DownloadResponse>` (`{ status, url, contentType, contentLength, stream }`).
 
-- **Parameters**:
-  - `attachmentId`: `string`
-- **Returns**: `Promise<ReadableStream>`.
+### `client.getMediaInfo(mediaId)`
 
-### `client.getMediaInfo(attachmentId)`
-
-Retrieves metadata about an uploaded attachment from memory or cache.
-
-- **Parameters**:
-  - `attachmentId`: `string`
-- **Returns**: `Promise<MediaInfo>`.
+Returns metadata for media uploaded through this client instance (memory plus cache). Unknown ids throw `APIError` with code `MEDIA_NOT_FOUND`.
 
 ---
 
@@ -271,154 +206,83 @@ Retrieves metadata about an uploaded attachment from memory or cache.
 
 ### `client.getThread(threadId)`
 
-Fetches detailed metadata, customization, and participant list for a thread via GraphQL doc `3449967031715030`.
+Fetches thread metadata through GraphQL document `3449967031715030`.
 
-- **Parameters**:
-  - `threadId`: `string`
 - **Returns**: `Promise<ThreadInfo>`.
 
 ### `client.getThreadList(options?)`
 
-Fetches recent threads with cursor pagination using GraphQL doc `3336396659757871`.
+Lists inbox threads with cursor pagination through GraphQL document `3336396659757871`.
 
-- **Parameters**:
-  - `options`: `ThreadListOptions`
-    - `limit?: number` (default `20`, max `100`)
-    - `cursor?: string`
-    - `folder?: "inbox" | "archived" | "spam"`
-- **Returns**: `Promise<ThreadListResult>` — `{ threads: ThreadInfo[], hasMore: boolean, cursor: string | null }`.
+- **Options**: `limit` (default `20`, max `100`), `cursor` (epoch-milliseconds string from a previous result), `tags` (default `["INBOX"]`).
+- **Returns**: `Promise<ThreadListResult>` — `{ threads, cursor, hasMore }`.
 
 ```ts
-const { threads, hasMore, cursor } = await client.getThreadList({ limit: 10 });
+const page = await client.getThreadList({ limit: 10 });
+if (page.hasMore) await client.getThreadList({ cursor: page.cursor });
 ```
 
 ### `client.getMessages(threadId, options?)`
 
-Fetches historical messages in a thread using GraphQL doc `1498317363570230`.
+Fetches message history through GraphQL document `1498317363570230`, newest first.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `options`: `MessageListOptions`
-    - `limit?: number` (default `20`, max `100`)
-    - `before?: string`
-- **Returns**: `Promise<MessageListResult>` — `{ messages: Message[], hasMore: boolean, cursor: string | null }`.
+- **Options**: `limit` (default `20`, max `100`), `before` (epoch milliseconds).
+- **Returns**: `Promise<MessageListResult>` — `{ messages, hasMore }`.
 
-### `client.muteThread(threadId, durationSeconds?)`
+### `client.muteThread(threadId)` / `client.unmuteThread(threadId)`
 
-Mutes notifications for a thread (`-1` for indefinite, or seconds).
+Mutes or unmutes notifications for a thread.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `durationSeconds`: `number` (default `-1`)
-- **Returns**: `Promise<void>`.
-
-### `client.unmuteThread(threadId)`
-
-Unmutes a previously muted thread.
-
-### `client.archiveThread(threadId, archive?)`
+### `client.archiveThread(threadId)` / `client.unarchiveThread(threadId)`
 
 Archives or unarchives a thread.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `archive`: `boolean` (default `true`)
-- **Returns**: `Promise<void>`.
-
 ### `client.deleteThread(threadId)`
 
-Deletes a thread and its history permanently from your inbox.
-
-- **Parameters**:
-  - `threadId`: `string`
-- **Returns**: `Promise<void>`.
+Deletes a thread from the inbox.
 
 ---
 
 ## Group Management
 
-### `client.createGroup(participantIds, name?)`
+### `client.createGroup(userIds, name?)`
 
-Creates a new group thread with initial participants using GraphQL doc `577041672419534`.
+Creates a group thread through GraphQL document `577041672419534`.
 
-- **Parameters**:
-  - `participantIds`: `string[]` — At least 2 user IDs.
-  - `name`: `string | undefined`
-- **Returns**: `Promise<{ threadId: string }>`.
+- **Parameters**: `userIds`: at least two user ids; `name`: optional group title.
+- **Returns**: `Promise<string>` — the new thread id.
 
-### `client.addParticipant(threadId, userIds)`
+### `client.addParticipant(threadId, userId)`
 
-Adds one or more users to an existing group thread.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `userIds`: `string | string[]`
-- **Returns**: `Promise<void>`.
+Adds a participant with a `log:subscribe` log message.
 
 ### `client.removeParticipant(threadId, userId)`
 
-Removes (kicks) a participant from a group thread.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `userId`: `string`
-- **Returns**: `Promise<void>`.
+Removes a participant through `/chat/remove_participants`.
 
 ### `client.changeGroupName(threadId, name)`
 
-Renames a group chat.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `name`: `string`
-- **Returns**: `Promise<void>`.
+Renames a group thread.
 
 ### `client.changeGroupPhoto(threadId, file)`
 
-Uploads and sets a new group avatar photo.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `file`: `FileInput`
-- **Returns**: `Promise<void>`.
+Uploads and sets the group photo.
 
 ### `client.changeGroupEmoji(threadId, emoji)`
 
-Changes the default reaction emoji of a group thread.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `emoji`: `string`
-- **Returns**: `Promise<void>`.
+Changes the group's default reaction emoji.
 
 ### `client.changeGroupTheme(threadId, color)`
 
-Changes the chat bubble color and background theme using GraphQL mutation `1727493033983591`.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `color`: `string` — A 6-character hex code (`"0084ff"`) or a `THREAD_COLORS` constant name (`"MessengerBlue"`, `"NeonGreen"`, etc.).
-- **Returns**: `Promise<void>`.
+Changes the group theme. `color` is a `THREAD_COLORS` name (`"MessengerBlue"`, `"NeonGreen"`, …) or a 6-digit hex value.
 
 ### `client.changeAdminStatus(threadId, userId, isAdmin)`
 
-Promotes or demotes an admin in a group thread.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `userId`: `string`
-  - `isAdmin`: `boolean`
-- **Returns**: `Promise<void>`.
+Promotes or demotes a group admin.
 
 ### `client.changeNickname(threadId, userId, nickname)`
 
-Sets or clears a participant's nickname in a thread.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `userId`: `string`
-  - `nickname`: `string` (max 500 chars; pass `""` to reset)
-- **Returns**: `Promise<void>`.
+Sets or clears a participant's nickname (pass `""` to clear).
 
 ---
 
@@ -426,48 +290,36 @@ Sets or clears a participant's nickname in a thread.
 
 ### `client.getMe()`
 
-Returns profile info of the authenticated account.
-
-- **Returns**: `Promise<UserInfo>`.
+Returns the authenticated account's profile.
 
 ### `client.getUser(userId)`
 
-Fetches public profile info for a user.
-
-- **Parameters**:
-  - `userId`: `string`
-- **Returns**: `Promise<UserInfo>`.
+Fetches a user profile through `/chat/user_info/`.
 
 ### `client.searchUsers(query)`
 
-Searches contacts by name using Facebook's typeahead API.
+Searches contacts through `/ajax/typeahead/search.php`.
 
-- **Parameters**:
-  - `query`: `string`
-- **Returns**: `Promise<UserSearchResult[]>`.
+- **Returns**: `Promise<readonly UserSearchResult[]>`.
 
 ### `client.getFriendList()`
 
-Returns the list of friends for the logged-in user.
+Returns friends through `/chat/user_info_all`.
 
-- **Returns**: `Promise<FriendInfo[]>`.
+- **Returns**: `Promise<readonly UserInfo[]>`.
 
 ### `client.searchThreads(query)`
 
-Searches thread names and group subjects.
+Searches threads by name through `/ajax/mercury/search_threads.php`.
 
-- **Parameters**:
-  - `query`: `string`
-- **Returns**: `Promise<ThreadSearchResult[]>`.
+- **Returns**: `Promise<readonly ThreadInfo[]>`.
 
 ### `client.searchMessages(query, options?)`
 
-Searches message content globally or within a specific thread.
+Searches message snippets globally, then per thread, through `/ajax/mercury/search_snippets.php?dpr=1`.
 
-- **Parameters**:
-  - `query`: `string`
-  - `options`: `MessageSearchOptions` (`threadId?: string`, `limit?: number`)
-- **Returns**: `Promise<MessageSearchResult[]>`.
+- **Options**: `limit` (default `20`, max `100`).
+- **Returns**: `Promise<readonly MessageSearchResult[]>` — `{ messageId, threadId, senderId, body, timestamp }`.
 
 ---
 
@@ -475,139 +327,132 @@ Searches message content globally or within a specific thread.
 
 ### `client.createPoll(threadId, question, options)`
 
-Creates a poll in a group thread.
+Creates a poll with at least two options.
 
-- **Parameters**:
-  - `threadId`: `string`
-  - `question`: `string`
-  - `options`: `string[]` (at least 2 options)
-- **Returns**: `Promise<{ pollId: string }>`.
+- **Returns**: `Promise<void>`.
 
-### `client.votePoll(pollId, selectedOptions)`
+### `client.votePoll(pollId, optionIds)`
 
-Casts votes for options in an active poll.
+Votes for one or more options.
 
-- **Parameters**:
-  - `pollId`: `string`
-  - `selectedOptions`: `string[]`
 - **Returns**: `Promise<void>`.
 
 ### `client.getPoll(pollId)`
 
-Fetches current options, votes, and totals for a poll.
-
-- **Parameters**:
-  - `pollId`: `string`
-- **Returns**: `Promise<PollInfo>`.
+Returns `{ id, question, options, optionCount }`. The options endpoint does not return the question, so the question comes from a cached poll event when available, otherwise `""`.
 
 ---
 
 ## Presence & Receipts
 
-### `client.setTyping(threadId, typing)`
+### `client.setTyping(threadId, isTyping)`
 
-Publishes a typing indicator to a thread over MQTT via `/ls_req` Type-4 task envelope.
-
-- **Parameters**:
-  - `threadId`: `string`
-  - `typing`: `boolean`
-- **Returns**: `Promise<void>`.
+Publishes a typing indicator through the type-4 `/ls_req` envelope.
 
 ### `client.markAsRead(threadId)`
 
-Marks all messages in a thread as read over `/mark_thread`.
-
-- **Parameters**:
-  - `threadId`: `string`
-- **Returns**: `Promise<void>`.
+Marks a thread read through `/mark_thread`.
 
 ### `client.markAsDelivered(messageId)`
 
-Sends a delivery receipt for a message.
-
-- **Parameters**:
-  - `messageId`: `string`
-- **Returns**: `Promise<void>`.
+Sends a delivery receipt. The thread is read from the cached message→thread map, so call `getMessages` first if the message was not seen live.
 
 ### `client.getPresence(userId)`
 
-Returns cached online presence for a user (populated by `/orca_presence`).
-
-- **Parameters**:
-  - `userId`: `string`
-- **Returns**: `Promise<{ status: "active" | "idle" | "offline" | "unknown", lastActiveEpochMs: number | null }>`.
+Returns `{ userId, status, lastActive, updatedAt }`, where `status` is `"online" | "idle" | "offline" | "unknown"`. Presence is served from the `/orca_presence` cache; unseen users return `"unknown"`.
 
 ---
 
 ## Middleware
 
-### `client.use(stage, handler, options?)`
+### `client.use(phase, hook, options?)`
 
-Registers an interceptor into the execution pipeline.
+Registers a middleware hook.
 
 - **Parameters**:
-  - `stage`: `"before" | "after" | "error"`
-  - `handler`: `MiddlewareHandler`
-  - `options`: `{ operation?: string, priority?: number }`
+  - `phase`: `"before" | "after" | "error"`
+  - `hook`: `(context, next) => void | Promise<void>`
+  - `options`: `{ operations?: string[], name?: string }`
 
-See [Middleware Documentation](middleware.md) for complete details.
+```ts
+client.use(
+  "before",
+  async (context, next) => {
+    context.request.headers.set("X-Request-Source", "my-bot");
+    await next();
+  },
+  { operations: ["sendMessage"] },
+);
+```
+
+The context exposes `operation`, `request` (`url`, `method`, `headers`), `response`, `error`, and `metadata`. See [Middleware](middleware.md).
 
 ---
 
 ## Plugins
 
-### `client.plugins.register(plugin)`
+Plugins are registered at construction and run in a sandboxed context (child logger, namespaced cache/storage, auto-removed listeners, scoped middleware).
 
-Loads and activates a sandboxed plugin.
+```ts
+const client = new MessengerClient({
+  plugins: [{ plugin: myPlugin }],
+});
+```
 
-- **Parameters**:
-  - `plugin`: `Plugin` (`name`, `version`, `init`, `destroy`)
-
-See [Plugins Documentation](plugins.md) for complete details.
+The `Plugin` contract exposes `name`, `version`, and optional `onLoad`, `onEnable`, `onDisable`, `onReload`, `onDestroy`. See [Plugins](plugins.md).
 
 ---
 
 ## Diagnostics
 
-### `client.diagnostics.getSnapshot()`
+### `client.diagnostics.getSnapshot()` / `client.diagnostics.reset()`
 
-Returns a real-time snapshot of runtime metrics, connection health, request latency, and cache efficiency.
+Returns or zeroes the diagnostics snapshot: HTTP request counts/latency/retries, MQTT heartbeat/reconnect/queue counters, cache hit rate, per-event counts and throughput, and process memory.
 
-- **Returns**: `DiagnosticsSnapshot`
-  - `http`: Connection pool stats, total requests, average latency, retry counts.
-  - `mqtt`: Connection duration, ping latency (`avgMs`), packet drop count.
-  - `cache`: Hit rates, item counts, invalidation totals.
-  - `process`: Memory usage (RSS, heap), process uptime.
+```ts
+const snapshot = client.diagnostics.getSnapshot();
+console.log(snapshot.http.requests.total, snapshot.mqtt.heartbeat.avgMs, snapshot.cache.hitRate);
+```
 
 ---
 
 ## Events
 
-The client extends a strongly typed event emitter:
-
 ```ts
-client.on("message", (event) => { ... });
-client.on("reaction", (event) => { ... });
-client.on("ready", (event) => { ... });
-client.on("warning", (event) => { ... });
-client.on("error", (event) => { ... });
+const unsubscribe = client.on("message", (event) => { ... });
+unsubscribe();
 ```
 
-| Event | Payload Type | Description |
+| Method | Description |
+| :--- | :--- |
+| `client.on(event, listener)` | Registers a typed listener; returns an unsubscribe function. |
+| `client.once(event, listener)` | One-shot listener; returns an unsubscribe function. |
+| `client.off(event, listener)` | Removes a listener. |
+| `client.removeAll(event?)` | Removes all listeners for an event, or every listener. |
+| `client.listenerCount(event)` | Number of registered listeners. |
+
+| Event | Payload | Description |
 | :--- | :--- | :--- |
-| `ready` | `ReadyEvent` | Fired when login and MQTT sync stream are fully ready. |
-| `message` | `MessageEvent` | Inbound message in 1:1 or group chat. |
-| `message_reply` | `MessageReplyEvent` | Inbound message that quotes another message. |
-| `message_unsend` | `MessageUnsendEvent` | A message was unsent / deleted. |
+| `ready` | `ReadyEvent` | Login finished and the realtime connection is up. |
+| `login` | `LoginEvent` | Authentication completed. |
+| `logout` | `LogoutEvent` | Session ended (voluntary, expired, or invalid). |
+| `message` | `MessageEvent` | New message in a 1:1 or group thread. |
+| `message_reply` | `MessageReplyEvent` | Message that quotes another message. |
+| `message_unsend` | `MessageUnsendEvent` | A message was unsent. |
 | `reaction` | `ReactionEvent` | A reaction was added or removed. |
-| `typing` | `TypingEvent` | A user started or stopped typing. |
-| `presence` | `PresenceEvent` | User online/idle state changed. |
-| `participant_join` | `ParticipantJoinEvent` | New members added to a group. |
-| `participant_leave`| `ParticipantLeaveEvent`| Members left or were kicked from a group. |
-| `admin_change` | `AdminChangeEvent` | Group admin promoted or demoted. |
-| `thread_update` | `ThreadUpdateEvent` | Group name, photo, emoji, or theme changed. |
-| `poll` | `PollEvent` | Poll created or votes cast. |
-| `warning` | `WarningEvent` | Non-fatal network glitch, retry, or parse anomaly. |
-| `error` | `ErrorEvent` | Critical background failure. |
-| `disconnect` | `DisconnectEvent` | MQTT disconnect after retries exhausted. |
-| `raw` | `RawEvent` | Unhandled or unrecognized Facebook delta payload. |
+| `typing` | `TypingEvent` | A participant started or stopped typing. |
+| `presence` | `PresenceEvent` | Presence changed. |
+| `read` | `ReadReceiptEvent` | A thread was marked read. |
+| `delivered` | `DeliveredEvent` | A message reached a device. |
+| `participant_join` | `ParticipantJoinEvent` | Members were added to a group. |
+| `participant_leave` | `ParticipantLeaveEvent` | Members left or were removed. |
+| `admin_change` | `AdminChangeEvent` | Group admin status changed. |
+| `thread_update` | `ThreadUpdateEvent` | Thread name, photo, emoji, theme, or nickname changed. |
+| `poll` | `PollEvent` | Poll created, voted on, or ended. |
+| `call` | `CallEvent` | Call activity. |
+| `reconnect` | `ReconnectEvent` | Realtime connection re-established after a drop. |
+| `disconnect` | `DisconnectEvent` | Realtime connection lost and not recovered. |
+| `error` | `ErrorEvent` | Internal, non-request error. |
+| `warning` | `WarningEvent` | Non-fatal issue. |
+| `debug` | `DebugEvent` | Internal debug output at `debug`/`trace` log levels. |
+| `raw` | `RawDeltaEvent` | Every MQTT payload before parsing. |

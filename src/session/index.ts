@@ -12,7 +12,7 @@
  */
 
 import { z } from "zod";
-import type { SerializedCookieJar } from "tough-cookie/dist/cookie/constants.js";
+import type { SerializedCookieJar } from "tough-cookie";
 import {
   COOKIE_REFRESH_CHECK_INTERVAL_MS,
   COOKIE_REFRESH_LEAD_TIME_MS,

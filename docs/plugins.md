@@ -1,106 +1,110 @@
 # Plugin Architecture
 
-Panindigan Automate features a sandboxed plugin system that enables developers to package and reuse reusable bot capabilities, integrations, and event listeners.
+Panindigan Automate plugins run in a sandboxed context: a child logger, namespaced cache and storage scopes, scoped middleware, and event listeners that are removed automatically when the plugin is disabled or destroyed.
 
 ---
 
 ## Plugin Interface
 
-A plugin is an object implementing the `Plugin` contract:
-
 ```ts
 import type { Plugin, PluginContext } from "panindigan-automate";
 
-export interface Plugin {
-  readonly name: string;
-  readonly version: string;
-  init(context: PluginContext): Promise<void> | void;
-  destroy?(): Promise<void> | void;
-}
+const messageCounter: Plugin = {
+  name: "message-counter",
+  version: "1.0.0",
+
+  async onLoad(context) {
+    context.on("message", async (event) => {
+      const count = Number((await context.cache.get(`count:${event.threadId}`)) ?? 0) + 1;
+      await context.cache.set(`count:${event.threadId}`, count, { tags: ["message-counter"] });
+      context.logger.debug({ threadId: event.threadId, count }, "counted");
+    });
+  },
+
+  async onEnable() {},
+  async onDisable() {},
+  async onReload() {},
+  async onDestroy() {},
+};
 ```
+
+All lifecycle hooks except `name`/`version` are optional:
+
+| Hook | Called when |
+| :--- | :--- |
+| `onLoad(context)` | The plugin is registered. |
+| `onEnable()` | The plugin becomes active (default at construction). |
+| `onDisable()` | The plugin is disabled. |
+| `onReload()` | The plugin is reloaded. |
+| `onDestroy()` | The plugin is destroyed permanently. |
+
+Registering a plugin name twice throws `PluginError`.
 
 ---
 
 ## Sandboxed Context (`PluginContext`)
 
-Each plugin receives an isolated `PluginContext` with dedicated resources:
-
 | Resource | Description |
 | :--- | :--- |
-| `context.client` | The parent `MessengerClient` instance. |
-| `context.logger` | A child logger namespaced to the plugin name (`[plugin:my-plugin]`). |
-| `context.cache` | A namespaced cache adapter so key collisions with other plugins are impossible. |
-| `context.storage` | A namespaced persistent storage adapter. |
-| `context.on(event, handler)` | Registers event listeners that are **automatically unregistered** when the plugin is destroyed. |
+| `context.name` | The plugin's name. |
+| `context.logger` | Child logger tagged with the plugin name. |
+| `context.cache` | Namespaced `CacheAdapter` (async `get`/`set`). |
+| `context.storage` | Namespaced `StorageAdapter`. |
+| `context.on(event, listener)` | Registers a typed event listener; removed with the plugin. |
+| `context.use(phase, hook, options?)` | Registers middleware scoped to the plugin. |
+
+The plugin never sees the cookie jar, the transports, or another plugin's state.
 
 ---
 
-## Writing a Plugin Example
+## Registering Plugins
 
-Here is a self-contained Auto-Responder plugin:
+Plugins are registered at construction:
 
 ```ts
-import type { Plugin, PluginContext } from "panindigan-automate";
+import { MessengerClient } from "panindigan-automate";
+import { messageCounter } from "./message-counter.js";
 
-export function createAutoResponderPlugin(triggers: Record<string, string>): Plugin {
+const client = new MessengerClient({
+  plugins: [
+    { plugin: messageCounter },
+    // Disable a plugin initially:
+    { plugin: anotherPlugin, options: { enabled: false } },
+  ],
+});
+```
+
+The client awaits plugin `onLoad`/`onEnable` before `login()` resolves, so listeners and middleware are active before the first event.
+
+---
+
+## Example: Auto-Responder
+
+```ts
+import type { MessengerClient, Plugin } from "panindigan-automate";
+
+export function createAutoResponder(getClient: () => MessengerClient): Plugin {
   return {
     name: "auto-responder",
     version: "1.0.0",
 
-    async init(context: PluginContext) {
-      context.logger.info("Initializing auto-responder plugin...");
-
-      // Listen to incoming messages using context.on
+    async onLoad(context) {
       context.on("message", async (event) => {
-        if (!event.body) return;
-
-        const replyText = triggers[event.body.trim().toLowerCase()];
-        if (replyText) {
-          context.logger.info(`Auto-replying to trigger: "${event.body}"`);
-          await context.client.sendMessage(event.threadId, {
+        if (!event.body || event.isSelf) return;
+        if (event.body.trim().toLowerCase() === "!ping") {
+          await getClient().sendMessage(event.threadId, {
             type: "text",
-            body: replyText,
+            body: "Pong!",
           });
         }
       });
     },
-
-    async destroy() {
-      // Clean up background timers or external database connections here
-    },
   };
 }
-```
-
----
-
-## Registering and Managing Plugins
-
-### At Construction
-
-```ts
-import { MessengerClient } from "panindigan-automate";
-import { createAutoResponderPlugin } from "./auto-responder.js";
 
 const client = new MessengerClient({
-  plugins: [
-    { plugin: createAutoResponderPlugin({ "!help": "Available commands: !ping, !info" }) }
-  ]
+  plugins: [{ plugin: createAutoResponder(() => client) }],
 });
 ```
 
-### Dynamically at Runtime
-
-```ts
-const plugin = createAutoResponderPlugin({ "!hello": "Hello there!" });
-
-// Register and activate
-await client.plugins.register(plugin);
-
-// Disable or enable
-await client.plugins.disable("auto-responder");
-await client.plugins.enable("auto-responder");
-
-// Unload and clean up listeners
-await client.plugins.unregister("auto-responder");
-```
+The plugin context also exposes `context.use(phase, hook, options?)` for middleware scoped to the plugin; see [Middleware](middleware.md) for the hook signature.

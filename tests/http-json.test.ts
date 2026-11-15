@@ -66,6 +66,16 @@ describe("interpretFacebookError", () => {
     expect(error?.code).toBe("API_ERROR");
   });
 
+  it("maps admin and group-only rejections to permission errors", () => {
+    const notAdmin = interpretFacebookError("changeAdminStatus", { error: 1976004 });
+    expect(notAdmin).toBeInstanceOf(PermissionError);
+    expect(notAdmin?.code).toBe("PERMISSION_NOT_ADMIN");
+
+    const groupOnly = interpretFacebookError("changeGroupName", { error: 1545003 });
+    expect(groupOnly).toBeInstanceOf(PermissionError);
+    expect(groupOnly?.code).toBe("PERMISSION_DENIED");
+  });
+
   it("returns null for a clean batch", () => {
     expect(
       interpretFacebookError("batch", [

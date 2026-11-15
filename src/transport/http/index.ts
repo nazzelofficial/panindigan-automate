@@ -470,7 +470,7 @@ export class HttpTransport {
       form.append(key, encodeFormValue(value));
     }
     if (file !== null) {
-      const blob = new Blob([file.content], {
+      const blob = new Blob([new Uint8Array(file.content)], {
         type: file.contentType ?? "application/octet-stream",
       });
       form.append(file.field, blob, file.filename);
@@ -977,8 +977,14 @@ export function interpretFacebookError(operation: string, json: unknown): Librar
         });
       case 1357031:
         return new PermissionError(
-          `Cannot perform "${operation}": the thread needs a message first`,
+          `Cannot perform "${operation}": Facebook rejected it (code 1357031)`,
           "PERMISSION_BLOCKED",
+          { context: { operation, code: error } },
+        );
+      case 1545003:
+        return new PermissionError(
+          `Cannot perform "${operation}": this is only available in group threads`,
+          "PERMISSION_DENIED",
           { context: { operation, code: error } },
         );
       case 1545012:
@@ -986,6 +992,12 @@ export function interpretFacebookError(operation: string, json: unknown): Librar
         return new PermissionError(
           `Cannot perform "${operation}": not part of the conversation`,
           "PERMISSION_NOT_PARTICIPANT",
+          { context: { operation, code: error } },
+        );
+      case 1976004:
+        return new PermissionError(
+          `Cannot perform "${operation}": you are not an admin of this thread`,
+          "PERMISSION_NOT_ADMIN",
           { context: { operation, code: error } },
         );
       default:

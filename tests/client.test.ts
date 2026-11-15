@@ -57,6 +57,24 @@ describe("MessengerClient construction", () => {
     ).not.toThrow();
   });
 
+  it("registers, counts and removes event listeners", () => {
+    const client = new MessengerClient({ storageAdapter: "memory", logLevel: "silent" });
+    const listener = (): void => undefined;
+
+    const unsubscribe = client.on("warning", listener);
+    expect(client.listenerCount("warning")).toBe(1);
+
+    client.off("warning", listener);
+    expect(client.listenerCount("warning")).toBe(0);
+
+    client.on("warning", listener);
+    client.removeAll("warning");
+    expect(client.listenerCount("warning")).toBe(0);
+
+    unsubscribe();
+    expect(client.listenerCount("warning")).toBe(0);
+  });
+
   it("rejects credentials without the required cookies before any network call", async () => {
     const client = new MessengerClient({ storageAdapter: "memory", persistSession: false, logLevel: "silent" });
     await expect(client.login({})).rejects.toBeInstanceOf(CookieError);

@@ -24,8 +24,12 @@ All notable changes to this project are documented in this file. The format is b
   - **Polls:** `createPoll`, `votePoll`, `getPoll`.
   - **Presence/receipts:** `setTyping` (type-4 `/ls_req` envelope, version `5849951561777440`), `markAsRead` (`/mark_thread`), `markAsDelivered` (`delivery_receipts.php`), `getPresence`.
   - `client.use(...)` middleware registration, plugin lifecycle wiring, diagnostics wiring, and `debug` events at `debug`/`trace` log levels.
+  - Group-thread kind resolution: the thread-kind cache is consulted first, ambiguous 15-character ids are resolved with a `MessengerGraphQLThreadFetcher` lookup, and only then does the web client's length heuristic apply. Group sends therefore target `thread_fbid` correctly even for 15-digit group ids.
+  - Edit verification: the `/ls_resp` task payload is checked for the echoed text, so an edit Facebook rejects (too old, or not yours) rejects with `APIError` instead of silently resolving.
+  - Forward verification: `/mercury/attachments/forward/` responses carrying `success: false` reject with `APIError`.
 - Group-chat coverage: group versus 1:1 send targeting (thread-kind cache first, length heuristic as fallback), group thread normalization, mentions, group polls, admin/nickname/emoji/theme/photo mutations, group history, and group search.
-- `tests/client.test.ts` — 28 tests covering client construction, session state, middleware, credential validation, thread/message/poll/search normalization, GraphQL batch extraction, media metadata, input validation, and the group-versus-1:1 message/log form builders.
+- `tests/client.test.ts` — 30 tests covering client construction, session state, middleware, event listener registration, credential validation, thread/message/poll/search normalization, GraphQL batch extraction, media metadata, input validation, and the group-versus-1:1 message/log form builders.
+- The root client exposes the typed event API directly: `client.on`, `client.once`, `client.off`, `client.removeAll`, and `client.listenerCount`. `on`/`once` return an unsubscribe function.
 
 ### Changed
 
@@ -44,6 +48,11 @@ All notable changes to this project are documented in this file. The format is b
 - `npm run build` no longer crashes with `SyntaxError: Unexpected token ':'` from TypeScript annotations in `build.mjs`.
 - The dual ESM/CJS build now loads correctly in both module systems (verified with `import()` and `require()`).
 - Image attachments in history and forced-fetch payloads no longer normalize to `type: "unknown"`.
+- Source builds against the upgraded dependency majors:
+  - `tough-cookie` 6: `SerializedCookieJar` is now imported from the package root (the `dist/cookie/constants.js` path no longer exists).
+  - `undici` 8 / `@types/node` 26: multipart `Blob`s are built from a copied `Uint8Array` (`Buffer` is no longer assignable to the DOM `BlobPart` shape).
+  - TypeScript 7: `moduleResolution: "node10"` was removed; the CommonJS build uses `"bundler"`.
+  - `zod` 4, `pino` 10, `vitest` 5, `@types/node` 26, `undici` 8, `tough-cookie` 6 — all tests pass and both module systems load and run.
 
 ## [0.1.1] - 2026-11-12
 

@@ -89,6 +89,8 @@ import type {
   ClientOptions,
   Credentials,
   DiagnosticsHandle,
+  EventListener,
+  EventName,
   FileInput,
   LoginResult,
   MediaInfo,
@@ -170,6 +172,18 @@ function readId(value: unknown): string | null {
     return String(value);
   }
   return null;
+}
+
+/** Reads a nested array path, returning `undefined` when any step is missing. */
+function readNested(value: unknown, path: readonly number[]): unknown {
+  let current: unknown = value;
+  for (const index of path) {
+    if (!Array.isArray(current)) {
+      return undefined;
+    }
+    current = current[index];
+  }
+  return current;
 }
 
 function randomClientId(): string {
@@ -327,6 +341,31 @@ export class MessengerClient {
   /** Registers a middleware hook. */
   use(phase: MiddlewarePhase, hook: MiddlewareHook, options?: MiddlewareRegistrationOptions | undefined): void {
     this.#middleware.register(phase, hook, options ?? {}, "user", "user");
+  }
+
+  /** Registers a typed event listener; returns an unsubscribe function. */
+  on<E extends EventName>(event: E, listener: EventListener<E>): () => void {
+    return this.#emitter.on(event, listener);
+  }
+
+  /** Registers a one-shot listener; returns an unsubscribe function. */
+  once<E extends EventName>(event: E, listener: EventListener<E>): () => void {
+    return this.#emitter.once(event, listener);
+  }
+
+  /** Removes a previously registered listener. */
+  off<E extends EventName>(event: E, listener: EventListener<E>): boolean {
+    return this.#emitter.off(event, listener);
+  }
+
+  /** Removes every listener for one event, or all listeners when omitted. */
+  removeAll(event?: EventName | undefined): void {
+    this.#emitter.removeAll(event);
+  }
+
+  /** Number of listeners registered for an event. */
+  listenerCount(event: EventName): number {
+    return this.#emitter.listenerCount(event);
   }
 
   /** The diagnostics handle. */
@@ -614,6 +653,16 @@ export class MessengerClient {
         context: { messageId: id },
       });
     }
+    // The task response echoes the edited text; a mismatch means Facebook
+    // rejected the edit (too old, or the message is not yours).
+    const replacement = readNested(asRecord(result)?.["step"], [1, 2, 2, 1, 4]);
+    if (typeof replacement === "string" && replacement !== body) {
+      throw new APIError(
+        "Facebook rejected the message edit — the message may be too old or not sent by you",
+        "API_ERROR",
+        { retryable: false, context: { messageId: id, expected: body, received: replacement } },
+      );
+    }
   }
 
   /** Unsends (deletes) a message. */
@@ -644,7 +693,14 @@ export class MessengerClient {
     for (const [index, attachment] of message.attachments.entries()) {
       const form: Record<string, FormValue> = { attachment_id: attachment.id };
       form[`recipient_map[${timestamp + index}]`] = target;
-      await this.#postForm("forwardMessage", `${FB_BASE_URL}/mercury/attachments/forward/`, form);
+      const json = await this.#postForm("forwardMessage", `${FB_BASE_URL}/mercury/attachments/forward/`, form);
+      const payload = asRecord(asRecord(json)?.["payload"]);
+      if (payload !== null && payload["success"] === false) {
+        throw new APIError("Facebook rejected the attachment forward", "API_ERROR", {
+          retryable: false,
+          context: { messageId: id, attachmentId: attachment.id },
+        });
+      }
     }
   }
 
@@ -1000,7 +1056,9 @@ export class MessengerClient {
   async changeGroupTheme(threadId: string, color: string): Promise<void> {
     const id = parseThreadId(threadId);
     const raw = parseThreadColor(color);
-    const named = THREAD_COLORS[raw as keyof typeof THREAD_COLORS];
+    const named =
+      THREAD_COLORS[raw as keyof typeof THREAD_COLORS] ??
+      Object.entries(THREAD_COLORS).find(([name]) => name.toLowerCase() === raw.toLowerCase())?.[1];
     let themeId: string;
     if (named !== undefined) {
       themeId = named;
@@ -1082,7 +1140,7 @@ export class MessengerClient {
         context: { userId: id },
       });
     }
-    const raw = asRecord(profiles[id]) ?? Object.values(profiles)[0];
+    const raw = asRecord(profiles[id]);
     const info = normalizeUser(raw, id);
     if (info === null) {
       throw new APIError(`Facebook returned no profile for "${id}"`, "API_ERROR", {
@@ -1306,7 +1364,7 @@ export class MessengerClient {
     const id = parseThreadId(threadId);
     const typing = parseBoolean(isTyping, "isTyping");
     const mqtt = this.#requireMqtt();
-    const isGroup = this.#isGroupThread(id);
+    const isGroup = await this.#isGroupThread(id);
     const content = {
       app_id: Number(FB_LS_APP_ID),
       payload: JSON.stringify({
@@ -1547,6 +1605,7 @@ export class MessengerClient {
 
     this.#clearSessionCaches();
     this.#userId = "";
+    void this.#session.clearPersisted();
     this.#emitter.emitAndForget("logout", {
       type: "logout",
       timestamp: Date.now(),
@@ -1591,10 +1650,23 @@ export class MessengerClient {
     });
   }
 
-  #isGroupThread(threadId: string): boolean {
+  async #isGroupThread(threadId: string): Promise<boolean> {
     const cached = this.#threadKinds.get(threadId);
     if (cached !== undefined) {
       return cached;
+    }
+    // Length 15 is ambiguous — user ids and some group ids share it. Ask
+    // Facebook once and cache the answer; on failure, use the length heuristic.
+    if (threadId.length === 15) {
+      try {
+        const info = await this.getThread(threadId);
+        return info.isGroup;
+      } catch (error) {
+        this.#logger.debug(
+          { threadId, err: errorMessage(error) },
+          "could not resolve the thread kind; falling back to the length heuristic",
+        );
+      }
     }
     // Matches the web client's heuristic: user ids are short, group ids long.
     return threadId.length > 15;
@@ -1605,7 +1677,7 @@ export class MessengerClient {
     content: MessageContent,
     replyToMessageId?: string | undefined,
   ): Promise<MessageSendResult> {
-    const isGroup = this.#isGroupThread(threadId);
+    const isGroup = await this.#isGroupThread(threadId);
     const offlineThreadingId = generateOfflineThreadingId();
     const form = buildMessageForm({
       userId: this.#requireUserId(),
@@ -1902,7 +1974,7 @@ export class MessengerClient {
       };
     }
 
-    return messageEventFromNode(node, threadId, this.#requireUserId(), this.#isGroupThread(threadId));
+    return messageEventFromNode(node, threadId, this.#requireUserId(), await this.#isGroupThread(threadId));
   }
 
   #cacheEventMessage(event: MessageEvent | MessageReplyEvent): void {

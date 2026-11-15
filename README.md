@@ -102,7 +102,7 @@ Notes:
 
 ## Events
 
-Listeners are typed end to end: register `client.on("message", …)` and the parameter is a `MessageEvent` — fields autocompleted, misspelled event names rejected at compile time.
+Listeners are typed end to end: register `client.on("message", …)` and the parameter is a `MessageEvent` — fields autocompleted, misspelled event names rejected at compile time. `client.on` and `client.once` return an unsubscribe function; `client.off`, `client.removeAll`, and `client.listenerCount` are also available.
 
 | Event | Fires when |
 |-------|------------|
@@ -261,6 +261,7 @@ Common options:
 | `logLevel` | `"info"` | `trace` through `fatal`, or `silent` |
 | `prettyPrint` | `false` | Human-readable console output via pino-pretty (dev only) |
 | `logFile` | — | Write logs to a file |
+| `logTransports` | `[]` | Additional transports receiving every log record |
 | `httpTimeout` | `30000` | Per-request timeout, in ms |
 | `httpRetries` | `3` | Retries on network errors and 429/5xx |
 | `httpMaxRedirects` | `5` | Redirect limit |
@@ -291,8 +292,8 @@ try {
 } catch (error) {
   if (error instanceof TimeoutError && error.retryable) {
     // worth trying again
-  } else if (error instanceof APIError && error.code === "API_RATE_LIMIT") {
-    // back off
+  } else if (error instanceof APIError && error.code === "API_ERROR") {
+    // Facebook rejected the request
   }
 }
 ```
@@ -322,7 +323,7 @@ Middleware hooks into every operation — before the request is sent, after the 
 client.use(
   "before",
   async (context, next) => {
-    context.headers.set("X-Request-Source", "my-bot");
+    context.request.headers.set("X-Request-Source", "my-bot");
     await next();
   },
   { operations: ["sendMessage"] },
@@ -340,9 +341,9 @@ const messageCounter: Plugin = {
   name: "message-counter",
   version: "1.0.0",
   async onLoad(context) {
-    context.on("message", (event) => {
-      const count = Number(context.cache.get(`count:${event.threadId}`) ?? 0) + 1;
-      context.cache.set(`count:${event.threadId}`, count, { tags: ["message-counter"] });
+    context.on("message", async (event) => {
+      const count = Number((await context.cache.get(`count:${event.threadId}`)) ?? 0) + 1;
+      await context.cache.set(`count:${event.threadId}`, count, { tags: ["message-counter"] });
       context.logger.debug({ threadId: event.threadId, count }, "counted");
     });
   },
@@ -393,7 +394,7 @@ Wire-level facts about how the library talks to Messenger, useful when debugging
 - **Login tokens.** `login()` loads `/home.php` and scrapes `fb_dtsg` from `DTSGInitialData`, `lsd` from `["LSD",[],{"token":"…"}]`, `clientID`, the MQTT region from the `irisSeqID`/`MqttWebConfig` endpoint payloads, and `iris_seq_id`; `jazoest` is derived as `"2"` plus the sum of the `fb_dtsg` character codes. With `validateOnLogin` (the default), `/chat/user_info/` is then posted for the authenticated id to confirm Facebook accepts the session, and `/ajax/presence/reconnect.php?reason=6` re-establishes the web client's presence session before the realtime connection is awaited.
 - **Lightweight service.** Message edits and typing indicators are task-style requests published to `/ls_req` (application id `2220391788200892`) and correlated by request id on `/ls_resp`, with a 10-second default timeout.
 - **GraphQL.** Thread list, thread info, and message history go through `/api/graphql` with document id `3336396659757871` (batch `MessengerGraphQLThreadlistFetcher` — also the source of the sync sequence id), `3449967031715030` (batch `MessengerGraphQLThreadFetcher`), and `1498317363570230`. Reactions use document id `1491398900900362`; forced fetches of a single delta's full payload use `2848441488556444` with `thread_and_message_id`, the same document used for quoted-message lookups. Group creation uses `577041672419534` at `/api/graphql/`; thread themes use `1727493033983591` at `/api/graphqlbatch/`. `/api/graphqlbatch/` replies are a sequence of concatenated JSON objects plus a summary object, not a JSON array.
-- **Mercury.** Sends and thread mutations use the classic form-encoded `/messaging/send/`-family endpoints with a rotating `fb_dtsg` token; attachments upload to Facebook's upload host first. Group sends set `thread_fbid`; 1:1 sends set `specific_to_list[0]`/`specific_to_list[1]` and `other_user_fbid`. Group membership is a `log:subscribe` log message; removals go to `/chat/remove_participants`. Group photo changes upload first, then post `thread_image_id` to `/messaging/set_thread_image/`.
+- **Mercury.** Sends and thread mutations use the classic form-encoded `/messaging/send/`-family endpoints with a rotating `fb_dtsg` token; attachments upload to Facebook's upload host first. Group sends set `thread_fbid`; 1:1 sends set `specific_to_list[0]`/`specific_to_list[1]` and `other_user_fbid`. The thread kind comes from the client's cache, from a thread-info lookup for ambiguous 15-character ids, and otherwise from the web client's length heuristic. Group membership is a `log:subscribe` log message; removals go to `/chat/remove_participants`. Group photo changes upload first, then post `thread_image_id` to `/messaging/set_thread_image/`.
 - **Lightweight service tasks.** Message edits use task label `742` (version `6903494529735864`, queue `edit_message`); typing indicators use the type-4 `/ls_req` envelope with version `5849951561777440` and `is_group_thread`/`is_typing` flags. Both are published to `/ls_req` and correlated on `/ls_resp`.
 - **Search.** Users go through `/ajax/typeahead/search.php`; threads through `/ajax/mercury/search_threads.php`; messages through `/ajax/mercury/search_snippets.php?dpr=1` — a global query returns matching threads plus per-thread totals, then a per-thread query returns the snippets (`message_id`, `author`, `timestamp`, `body`, `matched_keywords`).
 - **Polls.** Creation posts ordered `option_text_array[i]`/`option_is_selected_array[i]` fields to `/messaging/group_polling/create_poll/?dpr=1`; votes post `selected_options[i]` to `/messaging/group_polling/update_vote/?dpr=1`; options come from `/ajax/mercury/get_poll_options`. The options endpoint does not return the question, so `getPoll` uses the question cached from poll events when available and otherwise reports `""`.

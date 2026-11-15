@@ -97,7 +97,7 @@ const client = new MessengerClient({
 
 When session persistence is active:
 - After the first login, the full session state (validated cookies, latest MQTT sequence IDs, and `syncToken`) is saved locally in `./panindigan-session/`.
-- On subsequent startups, `client.login("./appstate.json")` reads the restored state, avoiding unnecessary full-page handshakes.
+- On subsequent startups, `client.login("./appstate.json")` restores the cursor, sync token, and region from storage, so the realtime connection can be created immediately; the home page is still loaded to rotate `fb_dtsg`/`lsd` tokens.
 - The `LoginResult` reflects whether the state was restored:
   ```ts
   const { userId, restored } = await client.login("./appstate.json");

@@ -35,7 +35,7 @@ Use a process manager like **PM2** or run inside a **Docker** container:
 npm install -g pm2
 
 # Run your compiled bot
-pm2 start dist/esm/index.js --name "messenger-bot"
+pm2 start bot.ts --name "messenger-bot"
 
 # Save process list on system reboot
 pm2 save

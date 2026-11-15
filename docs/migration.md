@@ -50,16 +50,16 @@ await client.login("./appstate.json");
 
 | Legacy Method | Panindigan Automate Equivalent | Notes |
 | :--- | :--- | :--- |
-| `api.sendMessage(msg, threadID, callback)` | `await client.sendMessage(threadId, content)` | Returns `{ messageId, timestamp }`. Direct/group routing is automatic. |
-| `api.setMessageReaction(reaction, messageID)` | `await client.setMessageReaction(messageId, reaction)` | Supports emojis (`"❤️"`) or keywords (`"heart"`). |
+| `api.sendMessage(msg, threadID, callback)` | `await client.sendMessage(threadId, content)` | Returns `{ messageId, threadId, offlineThreadingId }`. Direct/group routing is automatic. |
+| `api.setMessageReaction(reaction, messageID)` | `await client.addReaction(messageId, reaction)` | Supports emojis (`"❤️"`) or keywords (`"heart"`). |
 | `api.unsendMessage(messageID)` | `await client.unsendMessage(messageId)` | Un-sends a message for everyone. |
 | `api.editMessage(text, messageID)` | `await client.editMessage(messageId, text)` | Uses modern Task 742 `/ls_req` protocol. |
-| `api.addUserToGroup(userID, threadID)` | `await client.addParticipant(threadId, userIds)` | Accepts a single string or an array of strings. |
+| `api.addUserToGroup(userID, threadID)` | `await client.addParticipant(threadId, userId)` | Posts a `log:subscribe` log message. |
 | `api.removeUserFromGroup(userID, threadID)` | `await client.removeParticipant(threadId, userId)` | Removes participant from group thread. |
 | `api.setTitle(newTitle, threadID)` | `await client.changeGroupName(threadId, name)` | Renames group chat. |
 | `api.changeThreadColor(color, threadID)` | `await client.changeGroupTheme(threadId, color)` | Accepts 6-digit hex or preset name. |
 | `api.changeNickname(nickname, threadID, userID)`| `await client.changeNickname(threadId, userId, nickname)` | Pass `""` to reset nickname. |
-| `api.sendTypingIndicator(threadID, callback)` | `await client.setTyping(threadId, true/false)` | Uses Type-4 `/ls_req` task envelope. |
+| `api.sendTypingIndicator(threadID, callback)` | `await client.setTyping(threadId, true)` / `await client.setTyping(threadId, false)` | Uses the Type-4 `/ls_req` task envelope. |
 | `api.markAsRead(threadID)` | `await client.markAsRead(threadId)` | Marks thread messages as read. |
 | `api.getThreadInfo(threadID)` | `await client.getThread(threadId)` | Uses modern GraphQL doc `3449967031715030`. |
 | `api.getThreadHistory(threadID, amount)` | `await client.getMessages(threadId, { limit })` | Cursor-based message history. |
@@ -79,19 +79,19 @@ client.on("message", (event) => {
 
 // Quoted replies
 client.on("message_reply", (event) => {
-  console.log("Replied to message ID:", event.replyTo.id);
+  console.log("Replied to message ID:", event.repliedToMessageId);
 });
 
 // Group additions and leaves
 client.on("participant_join", (event) => {
-  console.log("Joined:", event.participants);
+  console.log("Joined:", event.addedIds);
 });
 client.on("participant_leave", (event) => {
-  console.log("Left/Kicked:", event.participantId);
+  console.log("Left/Kicked:", event.removedIds);
 });
 
 // Live reactions
 client.on("reaction", (event) => {
-  console.log(`${event.userId} reacted ${event.reaction} on message ${event.messageId}`);
+  console.log(`${event.userId} reacted ${event.emoji ?? "(removed)"} on message ${event.messageId}`);
 });
 ```

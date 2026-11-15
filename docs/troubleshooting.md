@@ -66,9 +66,9 @@ You can inspect the client's live performance and connection telemetry at any ti
 const snapshot = client.diagnostics.getSnapshot();
 
 console.log("MQTT Latency (ms):", snapshot.mqtt.heartbeat.avgMs);
-console.log("HTTP Requests Total:", snapshot.http.requestsTotal);
+console.log("HTTP Requests Total:", snapshot.http.requests.total);
 console.log("Cache Hit Rate:", snapshot.cache.hitRate);
-console.log("Process Memory (MB):", Math.round(snapshot.process.memoryUsage.heapUsed / 1024 / 1024));
+console.log("Process Memory (MB):", Math.round(snapshot.process.heapUsed / 1024 / 1024));
 ```
 
 ---

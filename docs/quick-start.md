@@ -81,7 +81,7 @@ client.on("message", async (event) => {
 
   // Handle a basic !ping command
   if (event.body.trim() === "!ping") {
-    await client.sendReply(event.threadId, event.id, {
+    await client.sendReply(event.threadId, event.messageId, {
       type: "text",
       body: "Pong! 🏓 Panindigan Automate is online.",
     });

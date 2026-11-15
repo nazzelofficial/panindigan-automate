@@ -10,7 +10,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { Cookie, CookieJar } from "tough-cookie";
-import type { SerializedCookieJar } from "tough-cookie/dist/cookie/constants.js";
+import type { SerializedCookieJar } from "tough-cookie";
 import { z } from "zod";
 import { CookieError } from "../errors/index.js";
 import {
