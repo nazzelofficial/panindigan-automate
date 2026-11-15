@@ -14,7 +14,7 @@ The standard output produced by browser cookie exporter extensions:
 const appState = [
   { key: "c_user", value: "1000123456789", domain: ".facebook.com", path: "/" },
   { key: "xs", value: "2%3Aabc123xyz...", domain: ".facebook.com", path: "/" },
-  { key: "datr", value: "xyz_abc...", domain: ".facebook.com", path: "/" }
+  { key: "datr", value: "xyz_abc...", domain: "facebook.com", path: "/" }
 ];
 await client.login(appState);
 ```

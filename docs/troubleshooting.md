@@ -38,11 +38,15 @@ try {
 * **Cause**: Your exported JSON file is missing one of the essential session cookies, or the cookies have expired.
 * **Fix**: Log in to Facebook in your normal browser, confirm your feed loads, and re-export the cookie jar. Ensure all three (`c_user`, `xs`, `datr`) are present.
 
-### 2. `AuthenticationError: Facebook returned no profile for ...`
+### 2. `AuthenticationError: Facebook rejected the session — home.php returned the logged-out page`
+* **Cause**: Facebook accepted your cookies at the HTTP layer but served the logged-out SSR splash screen (`MqttWebConfig` with `"fbid":"0"`). Your AppState no longer represents a logged-in session — expired, revoked, or the account was restricted (often after failed automation).
+* **Fix**: Log in to Facebook in your browser with the same account, solve any checkpoint, then re-export `appstate.json`. If the account was restricted, you must appeal in a browser — no library can bypass that. The error context and log line include `mqttWebConfigEmpty=true` and friends, so you can tell this apart from a page-format change by reading them.
+
+### 3. `AuthenticationError: Facebook returned no profile for ...`
 * **Cause**: Facebook invalidated the session, or the account encountered an interactive security challenge (checkpoint/verification prompt).
 * **Fix**: Open Facebook in your browser using the same IP / machine. Complete any security prompts, solve any required checkpoint, and export a fresh `appstate.json`.
 
-### 3. MQTT Reconnection Loops / Drops
+### 4. MQTT Reconnection Loops / Drops
 * **Cause**: High network latency, unstable local internet, or aggressive local firewall blocking WebSocket ports (`443`).
 * **Fix**: 
   - Check the client's `warning` events for specific disconnection reasons:
@@ -51,7 +55,7 @@ try {
     ```
   - If your hosting provider or ISP throttles WebSocket connections, route the client through a reliable residential or SOCKS5 proxy via the `httpProxy` option.
 
-### 4. `APIError: Facebook rejected the message edit`
+### 5. `APIError: Facebook rejected the message edit`
 * **Cause**: Trying to edit a message that:
   - Was sent by another user (you can only edit your own messages).
   - Was sent more than 15 minutes ago (Facebook's native edit window limit).

@@ -88,7 +88,7 @@ You authenticate with cookies exported from a browser session where you're alrea
 
 | Format | Input |
 |--------|-------|
-| AppState array | `[{ key: "c_user", value: "…", domain: ".facebook.com", path: "/", expires: "2027-03-01" }, …]` |
+| AppState array | `[{ key: "c_user", value: "…", domain: "facebook.com", path: "/", expires: "2027-03-01" }, …]` |
 | AppState object | `{ c_user: { value: "…" }, xs: { value: "…" } }` |
 | JSON file path | `"./appstate.json"` — file contents may be any other format |
 | Environment variable name | `"FB_APPSTATE"` — variable contains JSON in any other format |

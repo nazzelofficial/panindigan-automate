@@ -10,6 +10,20 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
+## [0.1.4] - 2026-11-15
+
+### Added
+
+- A dedicated, value-free home-page diagnostics module (`src/client/home.ts`). It reports `status`, the URL path only, body length, and booleans — `mqttWebConfigEmpty`, `fbDtsgPresent`, `lsdPresent`, `hasLoginForm`, `hasCheckpoint` — with zero cookies, tokens, or HTML.
+- `login()` and the background cookie refresh now log these diagnostics at `warn` level (visible at default `info` log levels) and include them in the thrown `AuthenticationError` context and in the error message itself, so production logs show exactly what Facebook served without a code change.
+- Explicit detection of Facebook's logged-out SSR splash screen: `MqttWebConfig` carrying `"fbid":"0"` now raises `AuthenticationError` with an actionable message ("re-export your cookies from a browser that is actually logged in") instead of the ambiguous "Could not read Facebook's session tokens from the home page".
+- Regression tests (`tests/home.test.ts`) with fixtures trimmed from live Facebook pages (November 2026): the logged-out splash, an authenticated boot payload, a checkpoint page, and an empty page.
+
+### Fixed
+
+- Facebook session rejection now classifies precisely: a logged-out splash screen (`fbid:"0"`), a login redirect, or a checkpoint page each produce a distinct, safe error — including whether the session was never accepted vs. an expired/challenged one — and all of them funnel to the same session-expiry teardown. Checkpoints are never bypassed.
+- The background cookie refresh applies the same logged-out/login/checkpoint detection and logs warn-level diagnostics, instead of failing silently behind `debug`-level logging.
+
 ## [0.1.3] - 2026-11-15
 
 ### Added

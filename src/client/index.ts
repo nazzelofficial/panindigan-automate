@@ -53,6 +53,10 @@ import { buildLogMessageForm, buildMessageForm } from "./forms.js";
 import { postGraphQL, postGraphQLBatch, postWebGraphQLMutation, type GraphQLBatchResult } from "./graphql.js";
 import { resolvePhotoUrl, uploadMedia } from "./media.js";
 import {
+  safeHomeDiagnostics,
+  summarizeHomeDiagnostics,
+} from "./home.js";
+import {
   messageEventFromNode,
   messageFromEvent,
   normalizeLegacyThread,
@@ -281,21 +285,6 @@ function extractLsd(html: string): string | undefined {
   m = html.match(/name="lsd"\s+value="([^"]+)"/) ?? html.match(/value="([^"]+)"\s+name="lsd"/);
   if (m?.[1]) return m[1];
   return undefined;
-}
-
-/**
- * Returns a human-readable, non-sensitive diagnostic object describing which
- * tokens were absent when extraction failed. No cookie or token values are
- * included — only boolean presence flags and metadata.
- */
-function diagnoseScrapeFailure(html: string): Record<string, unknown> {
-  return {
-    fbDtsgFound: extractFbDtsg(html) !== undefined,
-    lsdFound: extractLsd(html) !== undefined,
-    hasLoginForm: html.includes('id="loginform"'),
-    hasCheckpoint: /checkpoint|two_step_verification/i.test(html),
-    bodyLength: html.length,
-  };
 }
 
 /** Scrapes the session tokens Facebook embeds in `home.php`. */
@@ -1531,23 +1520,39 @@ export class MessengerClient {
 
   async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
     const response = await http.get("login", `${FB_BASE_URL}/home.php`);
-    // Detect session-expired and checkpoint redirects without exposing raw HTML.
+    const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+
+    // The logged-out splash screen carries no tokens by design; detect it
+    // precisely instead of trying to extract what isn't there.
+    if (diag.mqttWebConfigEmpty) {
+      const summary = summarizeHomeDiagnostics(diag);
+      this.#logger.warn(
+        { operation: "login", ...diag },
+        "Facebook returned the logged-out splash screen for this session",
+      );
+      throw new AuthenticationError(
+        `Facebook rejected the session — home.php returned the logged-out page (${summary}); re-export your cookies from a browser that is actually logged in`,
+        "AUTH_SESSION_EXPIRED",
+        { retryable: false, context: { operation: "login", ...diag } },
+      );
+    }
+
     const isLoginPage =
       response.url.includes("/login") ||
       response.url.includes("/checkpoint") ||
       response.url.includes("/two_step_verification") ||
-      response.body.includes('id="loginform"') ||
-      /"checkpoint"/.test(response.body) ||
-      /"CHECKPOINT"/.test(response.body);
+      diag.hasLoginForm ||
+      diag.hasCheckpoint;
     if (isLoginPage) {
       const isCheckpoint =
         response.url.includes("/checkpoint") ||
         response.url.includes("/two_step_verification") ||
-        /"checkpoint"/i.test(response.body);
+        diag.hasCheckpoint;
+      const summary = summarizeHomeDiagnostics(diag);
       throw new AuthenticationError(
         isCheckpoint
-          ? "Facebook requires a security checkpoint — log in via a browser to clear it"
-          : "Facebook rejected the session and redirected to the login page",
+          ? `Facebook requires a security checkpoint — log in via a browser to clear it (${summary})`
+          : `Facebook rejected the session and redirected to the login page (${summary})`,
         "AUTH_SESSION_EXPIRED",
         {
           retryable: false,
@@ -1555,20 +1560,20 @@ export class MessengerClient {
             operation: "login",
             url: response.url,
             isCheckpoint,
+            ...diag,
           },
         },
       );
     }
     const tokens = scrapeTokens(response.body, this.#requireUserId());
     if (tokens === null) {
-      // Include non-sensitive diagnostics to help diagnose which token was absent.
-      const diag = diagnoseScrapeFailure(response.body);
-      this.#logger.debug(
+      const summary = summarizeHomeDiagnostics(diag);
+      this.#logger.warn(
         { operation: "login", ...diag },
-        "token scrape failed — see context for which tokens were missing",
+        "token scrape failed — no token payloads found on the home page",
       );
       throw new AuthenticationError(
-        "Could not read Facebook's session tokens from the home page",
+        `Could not read Facebook's session tokens from the home page (${summary})`,
         "AUTH_LOGIN_REJECTED",
         {
           retryable: false,
@@ -1635,24 +1640,39 @@ export class MessengerClient {
   async #refreshCookies(): Promise<void> {
     const http = this.#requireHttp();
     const response = await http.get("cookieRefresh", `${FB_BASE_URL}/home.php`);
+    const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+
+    if (diag.mqttWebConfigEmpty) {
+      this.#handleSessionExpired("expired");
+      throw new AuthenticationError(
+        `Facebook rejected the session during cookie refresh — home.php returned the logged-out page (${summarizeHomeDiagnostics(diag)})`,
+        "AUTH_SESSION_EXPIRED",
+        { retryable: true, context: { operation: "cookieRefresh", ...diag } },
+      );
+    }
+
     const isExpiredPage =
       response.url.includes("/login") ||
       response.url.includes("/checkpoint") ||
       response.url.includes("/two_step_verification") ||
-      response.body.includes('id="loginform"');
+      diag.hasLoginForm ||
+      diag.hasCheckpoint;
     if (isExpiredPage) {
       this.#handleSessionExpired("expired");
       throw new AuthenticationError(
-        "Facebook redirected the session during cookie refresh",
+        `Facebook redirected the session during cookie refresh (${summarizeHomeDiagnostics(diag)})`,
         "AUTH_SESSION_EXPIRED",
-        { retryable: true, context: { operation: "cookieRefresh", url: response.url } },
+        { retryable: true, context: { operation: "cookieRefresh", ...diag } },
       );
     }
     const tokens = scrapeTokens(response.body, this.#requireUserId());
     if (tokens === null) {
-      const diag = diagnoseScrapeFailure(response.body);
+      this.#logger.warn(
+        { operation: "cookieRefresh", ...diag },
+        "token refresh failed — no token payloads found on the home page",
+      );
       throw new AuthenticationError(
-        "Could not refresh Facebook's session tokens",
+        `Could not refresh Facebook's session tokens (${summarizeHomeDiagnostics(diag)})`,
         "AUTH_LOGIN_REJECTED",
         { retryable: true, context: { operation: "cookieRefresh", ...diag } },
       );
