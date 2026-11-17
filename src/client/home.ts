@@ -108,20 +108,58 @@ export interface MobileTokens {
 }
 
 /**
- * @deprecated This function is no longer used internally as of v0.1.7.
- * Mobile token refresh does not work for expired sessions in modern Facebook.
- * Kept for backward compatibility only.
- * 
  * Scrapes `fb_dtsg` and `jazoest` from the server-rendered mobile surface
  * (`m.facebook.com/`). Facebook renders these as hidden inputs, which is how
  * the web/mobile clients refresh stale sessions (error 1357004).
+ * 
+ * Updated to handle modern Facebook mobile page structure (2024).
  */
 export function extractMobileTokens(html: string): MobileTokens | null {
-  const fbDtsg = html.match(/name="fb_dtsg"\s+value="([^"]+)"/)?.[1];
-  if (fbDtsg === undefined || fbDtsg === "") {
+  // Try multiple patterns for fb_dtsg extraction (modern Facebook variations)
+  let fbDtsg: string | undefined;
+  
+  // Pattern 1: Hidden input field (classic)
+  fbDtsg = html.match(/name="fb_dtsg"\s+value="([^"]+)"/)?.[1];
+  
+  // Pattern 2: Single-quoted variant
+  if (!fbDtsg) {
+    fbDtsg = html.match(/name='fb_dtsg'\s+value='([^']+)'/)?.[1];
+  }
+  
+  // Pattern 3: DTSGInitialData JSON payload (modern SPA)
+  if (!fbDtsg) {
+    fbDtsg = html.match(/"DTSGInitialData"[^}]*"token"\s*:\s*"([^"]+)"/)?.[1];
+  }
+  
+  // Pattern 4: Relaxed scan within requireLazy payload
+  if (!fbDtsg) {
+    fbDtsg = html.match(/["']token["']\s*:\s*["']([^"']{20,})["']/)?.[1];
+  }
+  
+  // Pattern 5: Direct token assignment
+  if (!fbDtsg) {
+    fbDtsg = html.match(/fb_dtsg["']?\s*:\s*["']([^"']+)["']/)?.[1];
+  }
+  
+  if (!fbDtsg || fbDtsg === "") {
     return null;
   }
-  const jazoest =
-    html.match(/name="jazoest"\s+value="([^"]+)"/)?.[1] ?? computeJazoest(fbDtsg);
+  
+  // Try multiple patterns for jazoest extraction
+  let jazoest: string | undefined;
+  
+  // Pattern 1: Hidden input field
+  jazoest = html.match(/name="jazoest"\s+value="([^"]+)"/)?.[1];
+  
+  // Pattern 2: Single-quoted variant
+  if (!jazoest) {
+    jazoest = html.match(/name='jazoest'\s+value='([^']+)'/)?.[1];
+  }
+  
+  // Pattern 3: Compute from fb_dtsg if not found
+  if (!jazoest) {
+    jazoest = computeJazoest(fbDtsg);
+  }
+  
   return { fbDtsg, jazoest };
 }

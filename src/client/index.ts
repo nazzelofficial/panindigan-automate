@@ -2532,50 +2532,71 @@ export class MessengerClient {
 
   /**
    * Rotates a stale-but-valid session: scrapes fresh `fb_dtsg`/`jazoest`
-   * from the mobile surface (`m.facebook.com/`), which serves these as
-   * server-rendered hidden inputs when the account is authenticated.
+   * from multiple Facebook surfaces (mobile, desktop, touch).
    * This mirrors the web clients' recovery for error 1357004 ("please
    * refresh") — the same technique fca-unofficial uses in refreshFb_dtsg.
    *
    * Best-effort by design: if Facebook refuses to serve tokens even with
    * the cookies, the session is revoked beyond recovery and this returns
    * false. Never logs or persists token values.
+   * 
+   * Updated to try multiple endpoints for better compatibility (2024).
    */
   async #refreshSessionTokens(http: HttpTransport): Promise<boolean> {
-    let response;
-    try {
-      // withDefaults:false — the mobile surface must not receive the very
-      // stale fb_dtsg/jazoest pair being refreshed; plain cookies are enough.
-      response = await http.get("refreshSessionTokens", "https://m.facebook.com/", {
-        withDefaults: false,
-        headers: { accept: HTML_ACCEPT_HEADER },
-      });
-    } catch (error) {
+    const surfaces = [
+      { url: "https://m.facebook.com/", name: "mobile" },
+      { url: "https://www.facebook.com/", name: "desktop" },
+      { url: "https://touch.facebook.com/", name: "touch" },
+    ];
+    
+    for (const surface of surfaces) {
+      let response;
+      try {
+        // withDefaults:false — the surface must not receive the very
+        // stale fb_dtsg/jazoest pair being refreshed; plain cookies are enough.
+        response = await http.get("refreshSessionTokens", surface.url, {
+          withDefaults: false,
+          headers: { accept: HTML_ACCEPT_HEADER },
+        });
+      } catch (error) {
+        this.#logger.warn(
+          { operation: "refreshSessionTokens", surface: surface.name, err: errorMessage(error) },
+          `${surface.name} surface request failed during token refresh`,
+        );
+        continue; // Try next surface
+      }
+      
+      const tokens = extractMobileTokens(response.body);
+      if (tokens !== null) {
+        const current = http.tokens;
+        http.setTokens({
+          userId: this.#requireUserId(),
+          fbDtsg: tokens.fbDtsg,
+          jazoest: tokens.jazoest,
+          lsd: current.lsd,
+          revision: current.revision,
+          region: current.region,
+        });
+        this.#logger.info(
+          { operation: "refreshSessionTokens", surface: surface.name },
+          `refreshed fb_dtsg/jazoest from ${surface.name} surface`,
+        );
+        this.#debug("login", `refreshed fb_dtsg/jazoest from the ${surface.name} surface`, {});
+        return true;
+      }
+      
       this.#logger.warn(
-        { operation: "refreshSessionTokens", err: errorMessage(error) },
-        "mobile surface request failed during token refresh",
+        { operation: "refreshSessionTokens", surface: surface.name, status: response.status },
+        `${surface.name} surface yielded no fb_dtsg/jazoest to refresh the session`,
       );
-      return false;
     }
-    const tokens = extractMobileTokens(response.body);
-    if (tokens === null) {
-      this.#logger.warn(
-        { operation: "refreshSessionTokens", status: response.status },
-        "mobile surface yielded no fb_dtsg/jazoest to refresh the session",
-      );
-      return false;
-    }
-    const current = http.tokens;
-    http.setTokens({
-      userId: this.#requireUserId(),
-      fbDtsg: tokens.fbDtsg,
-      jazoest: tokens.jazoest,
-      lsd: current.lsd,
-      revision: current.revision,
-      region: current.region,
-    });
-    this.#debug("login", "refreshed fb_dtsg/jazoest from the mobile surface", {});
-    return true;
+    
+    // All surfaces failed
+    this.#logger.warn(
+      { operation: "refreshSessionTokens" },
+      "no valid fb_dtsg/jazoest found on any surface (mobile, desktop, touch) - session is dead",
+    );
+    return false;
   }
 
   async #validateSession(http: HttpTransport): Promise<void> {

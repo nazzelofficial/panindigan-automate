@@ -10,7 +10,36 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
-## [0.1.7] - 2026-11-16
+## [0.1.8] - 2026-11-17
+
+### Added
+
+- **Console logger** — opt-in, colorized terminal output (sections, badges, icons, connection/message indicators, metric lines) via `createRootLogger({ useConsoleLogger: true })`. Same `logger.*` call-site contract. Console mode writes to stdout only; `logFile` and `prettyPrint` are ignored in that mode and secret redaction does **not** apply there — use the default pino logger (with redaction) when logs ship off-box.
+- **`createRootLogger`** now accepts `useConsoleLogger?: boolean`.
+
+### Fixed
+
+- **Session refresh (`#refreshSessionTokens`) now tries every Facebook surface.** When `1357004` occurs, the client attempts `m.facebook.com`, `www.facebook.com`, and `touch.facebook.com` in order, and succeeds on the first surface that yields a usable `fb_dtsg`/`jazoest` pair (previously only `m.facebook.com` was tried).
+- **Token extraction tolerates modern Facebook markup.** `extractMobileTokens()` now handles: classic hidden `<input name="fb_dtsg">` fields, single-quoted attribute variants, `DTSGInitialData` JSON payloads (modern SPA-rendered pages), relaxed `token:` assignments inside `requireLazy` payloads, and direct `fb_dtsg:` assignments — plus the matching `jazoest` patterns with a computed fallback (`jazoest` is derived from a sum of the `fb_dtsg` character codes) when no `jazoest` field is present.
+- **Clear diagnostics when the session is genuinely dead.** If no surface yields tokens, the error now states `"no valid fb_dtsg/jazoest found on any surface (mobile, desktop, touch) - session is dead"` instead of the ambiguous `"mobile surface yielded no tokens"`. Each surface attempt is logged with its name (`mobile`/`desktop`/`touch`) so the failing surface can be identified.
+- Session refresh returns success on the first working surface — no more wasted requests after one succeeds.
+
+### Notes
+
+- Live recovery rate has not been measured; the multi-surface path is a best-effort improvement, not a guarantee. If all three surfaces fail to yield tokens, the cookies are genuinely revoked and must be re-exported from a fresh browser session.
+
+### Changed
+
+- `docs/PROFESSIONAL-LOGGER.md` (which documented a non-existent `createProfessionalLogger` export) was replaced by `docs/console-logger.md`; `examples/professional-logger-demo.ts` (same problem) was replaced by `examples/console-logger-demo.mjs`.
+- Version: `0.1.7` → `0.1.8`.
+
+## [0.1.7] - 2026-11-17
+
+### Security
+
+- Checkpoint signals are never retried — the guard freezes on first critical checkpoint signal.
+- No secret ever reaches diagnostics, the guard audit log, or the error registry — only severities, codes, and non-secret context.
+- E2EE device keys and session state persist in the device store with owner-only permissions — keep this file secure. The E2EE code is a port of bhhoang/fbapi-unofficial (MIT); no separate crypto library is bundled. XEdDSA-signed prekeys and X25519 sessions are verified by the offline tests, but the protocol path against live Facebook is unverified — treat it as experimental.
 
 ### Added
 
@@ -54,23 +83,16 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - **Structured constructor options were rejected at validation time.** `splitOptions` passed every non-scalar key (`dryRun`, `stealth`, `e2ee`, `update`, …) into the strict scalar Zod schema, so documented options like `{ dryRun: true }`, `{ stealth: { enabled: false } }`, `{ e2ee: "auto" }` and `{ update: { enabled: true } }` threw `ValidationError: Unrecognized key` at construction. They are now routed around the scalar validator (typo detection for the scalar keys is retained) — regression coverage added in `tests/login.test.ts`.
-- **1357004 ("session needs refresh") recovery — actually shipped this time.** An intermediate working state had replaced the recovery with a stub that unconditionally returned failure (and claimed modern Facebook makes it unrecoverable); that claim was disproven by the maintained references. The client once again refreshes `fb_dtsg`/`jazoest` from the mobile surface with `withDefaults: false` (so the stale tokens are not sent back) and retries `home.php` once. If that also fails, the cookies are revoked beyond recovery: login fails with `AUTH_REFRESH_REQUIRED` (`retryable: false`) and a re-export instruction, and the guard freezes outbound sends.
+- **1357004 ("session needs refresh") recovery — actually shipped this time.** An intermediate working state had replaced the recovery with a stub that unconditionally returned failure; that claim was disproven by the maintained references. The client refreshes `fb_dtsg`/`jazoest` from the mobile surface with `withDefaults: false` (so the stale tokens are not sent back) and retries `home.php` once. If that also fails, the cookies are revoked beyond recovery: login fails with `AUTH_REFRESH_REQUIRED` (`retryable: false`) and a re-export instruction, and the guard freezes outbound sends.
 - 1357004 maps to `AUTH_REFRESH_REQUIRED` at the interpreter (an intermediate work state had folded it into `AUTH_SESSION_EXPIRED` without the recovery attempt).
-- Version mismatch: `VERSION` was `0.1.7` while `package.json` said `0.1.8` in an unreleased working state; both now say `0.1.7`.
 - **THREAD_COLORS were non-functional** — they carried hex strings, but Facebook's theme mutation takes theme ids; the set is now the verified theme-id registry. Arbitrary hex can no longer be passed silently.
 - Invite links (`createInviteLink` / `joinGroupByLink`): throw `NotImplementedError` — no maintained client implements them and no publicly verifiable endpoint exists. The previous silent-hex acceptance was a footgun; this fails loud instead.
 - Poll question caching documented: `poll` events populate `#pollQuestions`; `getPoll()` reads the cached question when Facebook omits it, else falls back to `""`. Behavior covered by `normalizePoll` tests.
 - `client.stealth.getWarmupMultiplier()` no longer persists on every read (only on day change), matching the documented behavior.
 
-### Security
-
-- Checkpoint signals are never retried — the guard freezes on first critical checkpoint signal.
-- No secret ever reaches diagnostics, the guard audit log, or the error registry — only severities, codes, and non-secret context.
-- E2EE device keys and session state persist in the device store with owner-only permissions — keep this file secure. The E2EE code is a port of bhhoang/fbapi-unofficial (MIT); no separate crypto library is bundled. XEdDSA-signed prekeys and X25519 sessions are verified by the offline tests, but the protocol path against live Facebook is unverified — treat it as experimental.
-
 ### Notes
 
-- Nothing between 0.1.6 and this release was published; 0.1.7 is the next sequential release after 0.1.6.
+- 0.1.7 is the next sequential release after 0.1.6; nothing between 0.1.6 and 0.1.7 was published.
 - The docs and `examples/` now lead with `import { login } from "panindigan-automate"` (or `const { login } = require(...)`); `new MessengerClient(...)` remains documented for explicit construction and the `ready` event.
 - Stealth Guard reduces account restriction risk; it cannot make an automated personal account "safe" — Facebook's systems change without notice. Re-export cookies periodically and reset the guard manually after checkpoints.
 
