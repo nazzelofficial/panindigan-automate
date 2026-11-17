@@ -58,16 +58,16 @@ try {
   - If your hosting provider or ISP throttles WebSocket connections, route the client through a reliable residential or SOCKS5 proxy via the `httpProxy` option.
 
 ### 5. `AuthenticationError: Facebook rejected the session — Not logged in while calling "home" (status=200 …)` 
-* **Cause**: Facebook's response to `GET /home.php` was not a page at all — it was a tiny JSON error envelope (seen in production as `status=200 path=/home.php bytes=249`), which means the session is not authenticated — or expired/revoked/checkpoint-flagged — at the HTTP layer. The `Accept` header this library now sends (`text/html,...`) will cause Facebook to answer with the real page on newer deployments; older builds sent `*/*` and always got the JSON envelope back.
+* **Cause**: Facebook's response was not a page at all — it was a tiny JSON error envelope (seen in production as `status=200 path=/home.php bytes=249`). Facebook serves this envelope when it considers the session unusable for HTML navigations. The `Accept` header this library sends (`text/html,…`) does not guarantee a real page in return — treat the envelope as authoritative.
 * **Fix**: The error now tells you exactly what Facebook answered. Re-export your cookies from a browser where the account is confirmed logged in, switch to a non-restricted account if the current one was flagged, and redeploy. If Facebook still rejects the session on a confirmed-fresh export, the account itself is blocked — no library can bypass that; appeal to Meta, or run the bot from an account Facebook trusts.
 
 ### 6. `AuthenticationError: Facebook rejected the session — session is too stale to reuse (error 1357004)`
-* **Cause**: Facebook's current stack answers `home.php` for an inactive-but-alive session with `{"error":1357004}` (the envelope seen in production as `status=200 path=/home.php bytes=249`), which fbchat documents as "client has been inactive for too long". Your cookies are still accepted server-side, but your `fb_dtsg`/`jazoest` pair is too old to trust. Since 0.1.7 the library attempts the standard recovery — scrape fresh tokens from the mobile surface and retry `home.php` once — and only then throws `AUTH_REFRESH_REQUIRED`.
+* **Cause**: Facebook answers `/home.php` with a tiny JSON error envelope (`{"error":1357004,…}`, seen in production as `status=200 bytes=249`) instead of serving the page. The client attempts an in-flight `fb_dtsg` rotation across several surfaces (mobile, touch, desktop) before giving up; when every surface answers with the same envelope or a logged-out page, the error is thrown. Note: `1357004` is Facebook's signal that this session may not be reused for home-page navigations — it is not something the library can rotate its way around.
 * **Fix**:
-  1. Open Facebook in your browser, confirm you can see your feed.
-  2. Export fresh `appstate.json` (EditThisCookie / Cookie-Editor) and redeploy.
-  3. If the error persists on a confirmed-fresh export from a residential connection, the account is restricted — check facebook.com for restriction notices; no library can bypass an account-level block.
-* **Why it keeps happening**: cookies age. `fb_dtsg` is rotated frequently; your refreshed session may die within days on a heavily automated account. Re-export cookies weekly — the library keeps `fb_dtsg`/`jazoest` rotated automatically, but only while cookies remain valid.
+  1. Open Facebook in your browser, confirm you can see your feed (do not rely on a browser tab that was left open for days — it may already be dead).
+  2. Export fresh `appstate.json` (EditThisCookie / Cookie-Editor) from that live session and redeploy. Since 0.1.9, a fresh export always beats the stale persisted session (see `[0.1.9]` in CHANGELOG); on 0.1.8 and earlier the persisted jar silently masked fresh exports, which is why re-exporting "did nothing".
+  3. If the error persists on a confirmed-fresh export from a residential connection, the account is restricted — check facebook.com for restriction notices; no library can bypass an account-level block. Appeal to Meta or use another account.
+* **Why it keeps happening**: cookies age and `fb_dtsg` rotates frequently; a heavily automated account can be forced to re-export weekly. The library keeps `fb_dtsg`/`jazoest` rotated automatically, but only while the underlying cookies are accepted by Facebook.
 
 ### 7. `AuthenticationError: Facebook rejected the message edit`
 * **Cause**: Trying to edit a message that:

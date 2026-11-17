@@ -10,6 +10,24 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
+## [0.1.9] - 2026-11-17
+
+Patch release. Consolidates the session/login code and fixes a false-positive token refresh introduced in 0.1.8.
+
+### Fixed
+
+- **Session module consolidated — one implementation to audit.** The helpers in `src/client/home.ts` (home-page diagnostics, session-token extraction) were moved into `src/client/index.ts` and `src/client/home.ts` was deleted. Login/session code now lives in one file.
+- **`#refreshSessionTokens` no longer reports a false success.** Previously a surface counted as refreshed when the page contained any bare `"token": "<20+ chars>"` string — an unanchored pattern that matched unrelated values anywhere in the page, so a deployment logged "Refreshed fb_dtsg/jazoest" and then threw `AUTH_REFRESH_REQUIRED` seconds later. Now a surface only counts when: (1) Facebook's structured error envelope is absent, (2) the page is not the logged-out splash screen, (3) the final URL is not a login/checkpoint redirect, and (4) a DTSG-anchored `fb_dtsg` is actually found (same strict patterns as the main scrape path). `jazoest` is always derived from `fb_dtsg`, matching the web client.
+- **The bare-`"token"` and bootloader-`A/Q` extraction patterns were removed.** Kept: hidden `fb_dtsg` inputs, `DTSGInitialData`/`DTSGInitData` requireLazy payloads (relaxed scan within that key's neighbourhood), `async_get_token`, and `fb_dtsg`-keyed JavaScript assignments.
+- **The mobile user-agent override was removed** from the refresh path — acceptance is decided by the returned page, not by the UA string.
+- **Login tests pass again.** One regression test was failing (a 6-character `abc123` fixture against the 10-character minimum). Fixtures were corrected and new regression tests pin down the false-positive class: a bare token-shaped value without DTSG context yields no token; the exact production `1357004` envelope yields no token and maps to `AUTH_REFRESH_REQUIRED`.
+- **A fresh appstate export is no longer silently ignored by a stale persisted session.** `prepareLogin()` preferred the persisted jar whenever it matched the account and passed date-based validation — which is blind to server-side revocation (1357004). Deployments logged in with a dead persisted jar forever no matter how often the appstate was re-exported. Now the persisted jar wins only when it matches the supplied credentials on the required cookies (pure background refresh), or when the supplied file is older than the last persist; otherwise the supplied credentials (fresh export, environment variable, or programmatic input) win. The choice is logged as `cookieSource: credentials|storage`.
+
+### Notes
+
+- **This release does not and cannot revive a `1357004`-revoked session.** Facebook answered the deployment's `/home.php` with its "session too stale" error envelope on every surface; on 1357004 the account must be re-exported from a browser that is actively logged in. There is no client-side rotation that fixes that — see `docs/troubleshooting.md`.
+- Validated against offline fixtures. Live behavior against Facebook has not been verified by the maintainers.
+
 ## [0.1.8] - 2026-11-17
 
 ### Added
@@ -20,7 +38,7 @@ All notable changes to this project are documented in this file. The format is b
 ### Fixed
 
 - **Session refresh (`#refreshSessionTokens`) now tries every Facebook surface.** When `1357004` occurs, the client attempts `m.facebook.com`, `www.facebook.com`, and `touch.facebook.com` in order, and succeeds on the first surface that yields a usable `fb_dtsg`/`jazoest` pair (previously only `m.facebook.com` was tried).
-- **Token extraction tolerates modern Facebook markup.** `extractMobileTokens()` now handles: classic hidden `<input name="fb_dtsg">` fields, single-quoted attribute variants, `DTSGInitialData` JSON payloads (modern SPA-rendered pages), relaxed `token:` assignments inside `requireLazy` payloads, and direct `fb_dtsg:` assignments — plus the matching `jazoest` patterns with a computed fallback (`jazoest` is derived from a sum of the `fb_dtsg` character codes) when no `jazoest` field is present.
+- **Token extraction tolerates modern Facebook markup.** `extractMobileTokens()` now handles: classic hidden `<input name="fb_dtsg">` fields, single-quoted attribute variants, `DTSGInitialData` JSON payloads (modern SPA-rendered pages), relaxed `token:` assignments inside `requireLazy` payloads, and direct `fb_dtsg:` assignments — plus the matching `jazoest` patterns with a computed fallback (`jazoest` is derived from a sum of the `fb_dtsg` character codes) when no `jazoest` field is present. **Note: the bare-`token` patterns above were too broad and are removed in 0.1.9 — see `[0.1.9]`.**
 - **Clear diagnostics when the session is genuinely dead.** If no surface yields tokens, the error now states `"no valid fb_dtsg/jazoest found on any surface (mobile, desktop, touch) - session is dead"` instead of the ambiguous `"mobile surface yielded no tokens"`. Each surface attempt is logged with its name (`mobile`/`desktop`/`touch`) so the failing surface can be identified.
 - Session refresh returns success on the first working surface — no more wasted requests after one succeeds.
 

@@ -28,7 +28,7 @@ client.on("error", (event) => {
 | `AUTH_INVALID_CREDENTIALS` | Login was refused at the earliest checkpoint. | Re-export cookies from a browser where you are logged in. |
 | `AUTH_SESSION_EXPIRED` | Facebook rejected the session (logged-out splash, login redirect, or checkpoint). | Re-export cookies from a browser that is actually logged in; solve any checkpoint there first. |
 | `AUTH_LOGIN_REJECTED` | Facebook answered "Not logged in" (error `1357001`) or the home page carried no tokens. | Confirm the account is logged in at facebook.com; checkpoint or restriction may be involved. |
-| `AUTH_REFRESH_REQUIRED` | Session too stale (`1357004`); the client already attempted a mobile-surface token rotation and it was not enough. | Re-export fresh cookies. The account may also be restricted — check facebook.com in a browser. |
+| `AUTH_REFRESH_REQUIRED` | Session too stale (`1357004`) or `fb_dtsg` rejected on every surface; the client already attempted a multi-surface token rotation and Facebook still answered with the error envelope. | Re-export fresh cookies from a browser that is actually logged in. The account may also be restricted — check facebook.com in a browser. |
 
 ## Cookies
 

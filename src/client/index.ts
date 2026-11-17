@@ -49,6 +49,8 @@ import { SessionManager } from "../session/index.js";
 import {
   computeJazoest,
   HttpTransport,
+  interpretFacebookError,
+  parseFacebookJson,
   type DownloadResponse,
   type FormValue,
 } from "../transport/http/index.js";
@@ -58,12 +60,6 @@ import { generateOfflineThreadingId } from "../utils/index.js";
 import { buildLogMessageForm, buildMessageForm } from "./forms.js";
 import { postGraphQL, postGraphQLBatch, postWebGraphQLMutation, type GraphQLBatchResult } from "./graphql.js";
 import { resolvePhotoUrl, uploadMedia } from "./media.js";
-import {
-  extractFacebookApiError,
-  extractMobileTokens,
-  safeHomeDiagnostics,
-  summarizeHomeDiagnostics,
-} from "./home.js";
 import { StealthGuard, type SuspensionSignal, type StealthState } from "../stealth/index.js";
 import { detector } from "../stealth/detector.js";
 import { IdempotencyManager } from "../stealth/idempotency.js";
@@ -328,6 +324,129 @@ function scrapeTokens(html: string, userId: string): ScrapedTokens | null {
     region: extractRegion(html),
     irisSeqId: extractIrisSeqId(html),
   };
+}
+
+/* ------------------------------------------------------------------ */
+/* Session home-page diagnostics — single implementation.              */
+/*                                                                     */
+/* These helpers exist so the login path can say *exactly* what        */
+/* Facebook served without ever exposing cookie values, tokens, or      */
+/* raw HTML. They were consolidated from a separate module so the       */
+/* session path has exactly one implementation to audit.                 */
+/* ------------------------------------------------------------------ */
+
+/** Boolean summary of what the home page contains. Never includes values. */
+export interface HomePageDiagnostics {
+  /** HTTP status code of the home/refresh request. */
+  readonly status: number;
+  /** Path component of the final URL only (no query string, no tokens). */
+  readonly path: string;
+  /** Response body length in bytes. */
+  readonly contentLength: number;
+  /** True when MqttWebConfig is empty (`fbid:"0"`) — Facebook's logged-out splash screen. */
+  readonly mqttWebConfigEmpty: boolean;
+  /** True when the page mentions an `fb_dtsg` token payload. */
+  readonly fbDtsgPresent: boolean;
+  /** True when the page mentions an `LSD` token payload. */
+  readonly lsdPresent: boolean;
+  /** True when the page carries a login form marker. */
+  readonly hasLoginForm: boolean;
+  /** True when the page carries a checkpoint marker. */
+  readonly hasCheckpoint: boolean;
+}
+
+/**
+ * Detects Facebook's logged-out splash screen, which carries an empty
+ * `MqttWebConfig` (`"fbid":"0"`). A valid session always gets a non-zero
+ * fbid, so this is a reliable, value-free session-rejection signal.
+ */
+export function isLoggedOutHomePage(html: string): boolean {
+  return /"MqttWebConfig"\s*,\s*\[\s*\]\s*,\s*\{\s*"fbid"\s*:\s*"0"/.test(html);
+}
+
+/** Collects the safe boolean summary of a home page response. */
+export function safeHomeDiagnostics(
+  html: string,
+  url: string,
+  status: number,
+): HomePageDiagnostics {
+  let path = "unknown";
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    // Keep the pathname fallback readable and value-free.
+  }
+
+  return {
+    status,
+    path,
+    contentLength: html.length,
+    mqttWebConfigEmpty: isLoggedOutHomePage(html),
+    fbDtsgPresent:
+      /DTSGInit(?:ial)?Data"\s*,\s*\[\s*\]\s*,/.test(html) || /name="fb_dtsg"/i.test(html),
+    lsdPresent: /\["LSD"\s*,\s*\[\s*\]\s*,/.test(html) || /name="lsd"/i.test(html),
+    hasLoginForm:
+      /id="loginform"/i.test(html) ||
+      /id="login_form"/i.test(html) ||
+      /id="loginForm"/i.test(html),
+    hasCheckpoint: /checkpoint|two_step_verification/i.test(html),
+  };
+}
+
+/** One-line, safe summary suitable for log lines and error messages. */
+export function summarizeHomeDiagnostics(diagnostics: HomePageDiagnostics): string {
+  return [
+    `status=${diagnostics.status}`,
+    `path=${diagnostics.path}`,
+    `bytes=${diagnostics.contentLength}`,
+    `mqttWebConfigEmpty=${diagnostics.mqttWebConfigEmpty}`,
+    `fbDtsg=${diagnostics.fbDtsgPresent}`,
+    `lsd=${diagnostics.lsdPresent}`,
+    `loginForm=${diagnostics.hasLoginForm}`,
+    `checkpoint=${diagnostics.hasCheckpoint}`,
+  ].join(" ");
+}
+
+/**
+ * Detects Facebook's structured JSON error envelope (`{"error":1357001,…}`).
+ *
+ * Unauthenticated requests to `www.facebook.com/home.php` that are not
+ * treated as browser HTML navigations come back as a small JSON error
+ * document instead of a page — an actual response body seen in production.
+ * Returns the mapped `LibraryError` when the body carries one, or `null`
+ * otherwise (e.g. a real HTML page). Never throws.
+ */
+export function extractFacebookApiError(body: string): LibraryError | null {
+  const parsed = parseFacebookJson(body);
+  if (parsed === null) {
+    return null;
+  }
+  return interpretFacebookError("home", parsed);
+}
+
+/** Shape of the fresh tokens extracted from a page during session refresh. */
+export interface SessionTokens {
+  readonly fbDtsg: string;
+  /** Always derived from fb_dtsg — see computeJazoest. */
+  readonly jazoest: string;
+}
+
+/**
+ * Extracts a fresh `fb_dtsg` from a surface using ONLY the strict,
+ * DTSG-anchored patterns shared with the main scrape path (`extractFbDtsg`).
+ *
+ * A bare `"token":"…"` without DTSG context is never accepted — earlier
+ * revisions matched any token-shaped value anywhere in the page, which
+ * produced false "refreshed" reports on pages that carried no session
+ * tokens at all. jazoest is always derived from fb_dtsg (`"2"` plus the sum
+ * of fb_dtsg character codes), exactly like the web client computes it.
+ */
+export function extractSessionTokens(html: string): SessionTokens | null {
+  const fbDtsg = extractFbDtsg(html);
+  if (fbDtsg === undefined || fbDtsg.length < 10) {
+    return null;
+  }
+  return { fbDtsg, jazoest: computeJazoest(fbDtsg) };
 }
 
 /**
@@ -2396,39 +2515,130 @@ export class MessengerClient {
   }
 
   async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
-    const attemptHome = () =>
-      http.get("login", `${FB_BASE_URL}/home.php`, {
-        headers: { accept: HTML_ACCEPT_HEADER },
-      });
+    // Try the desktop surface first, then the mobile ones. A live
+    // session refreshes its fb_dtsg as a side effect of the scrape; a
+    // revoked session answers with a structured error on every surface.
+    const endpoints = [
+      { url: `${FB_BASE_URL}/home.php`, name: "desktop home" },
+      { url: "https://m.facebook.com/home.php", name: "mobile home" },
+      { url: "https://m.facebook.com/", name: "mobile root" },
+    ];
 
-    let response = await attemptHome();
-
-    let diag = safeHomeDiagnostics(response.body, response.url, response.status);
-
-    // Facebook answers stale-but-valid sessions with error 1357004 ("please
-    // refresh"). Recovery mirrors the web clients: refresh fb_dtsg/jazoest
-    // from the mobile surface, then retry home.php once. Best-effort — if
-    // Facebook rejects that too, the cookies are revoked beyond recovery.
-    let apiError = extractFacebookApiError(response.body);
-    if (apiError?.code === "AUTH_REFRESH_REQUIRED") {
-      const refreshed = await this.#refreshSessionTokens(http);
-      if (refreshed) {
-        response = await attemptHome();
-        diag = safeHomeDiagnostics(response.body, response.url, response.status);
-        apiError = extractFacebookApiError(response.body);
-      }
+    let lastResponse: Awaited<ReturnType<typeof http.get>> | null = null;
+    let lastDiag: ReturnType<typeof safeHomeDiagnostics> | null = null;
+    let bestTokens: ScrapedTokens | null = null;
+    
+    // Rotate the fb_dtsg before scraping — best effort. A false success
+    // is not possible: a surface only counts when a DTSG-anchored token
+    // is actually present (see #refreshSessionTokens).
+    const refreshed = await this.#refreshSessionTokens(http);
+    if (!refreshed) {
+      this.#logger.warn(
+        { operation: "login" },
+        "Could not rotate fb_dtsg on any surface — the session may already be revoked; a fresh export may be required",
+      );
     }
 
+    // Try each endpoint until we get valid tokens
+    for (const endpoint of endpoints) {
+      let response: Awaited<ReturnType<typeof http.get>>;
+      try {
+        response = await http.get("login", endpoint.url, {
+          headers: { accept: HTML_ACCEPT_HEADER },
+        });
+      } catch (error) {
+        this.#logger.warn(
+          { operation: "login", endpoint: endpoint.name, err: errorMessage(error) },
+          `Failed to fetch ${endpoint.name}`,
+        );
+        continue;
+      }
+
+      lastResponse = response;
+      const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+      lastDiag = diag;
+
+      // Check for structured API errors first
+      const apiError = extractFacebookApiError(response.body);
+      if (apiError !== null) {
+        this.#logger.warn(
+          { operation: "login", endpoint: endpoint.name, code: apiError.code },
+          `${endpoint.name} returned API error: ${apiError.code}`,
+        );
+        continue;
+      }
+
+      // Skip if logged-out page
+      if (diag.mqttWebConfigEmpty) {
+        this.#logger.warn(
+          { operation: "login", endpoint: endpoint.name },
+          `${endpoint.name} returned logged-out splash screen`,
+        );
+        continue;
+      }
+
+      // Skip if redirected to login/checkpoint
+      const isLoginPage =
+        response.url.includes("/login") ||
+        response.url.includes("/checkpoint") ||
+        response.url.includes("/two_step_verification") ||
+        diag.hasLoginForm ||
+        diag.hasCheckpoint;
+      if (isLoginPage) {
+        this.#logger.warn(
+          { operation: "login", endpoint: endpoint.name, url: response.url },
+          `${endpoint.name} redirected to login/checkpoint`,
+        );
+        continue;
+      }
+
+      // Try to scrape tokens
+      const tokens = scrapeTokens(response.body, this.#requireUserId());
+      if (tokens !== null) {
+        this.#logger.info(
+          { operation: "login", endpoint: endpoint.name, region: tokens.region },
+          `Successfully scraped tokens from ${endpoint.name}`,
+        );
+        bestTokens = tokens;
+        break; // Success!
+      }
+
+      this.#logger.warn(
+        { operation: "login", endpoint: endpoint.name, bytes: diag.contentLength },
+        `${endpoint.name} did not yield scrapeable tokens`,
+      );
+    }
+
+    // If we got tokens from any endpoint, use them
+    if (bestTokens !== null) {
+      return bestTokens;
+    }
+
+    // All endpoints failed — build comprehensive error
+    const diag = lastDiag ?? {
+      status: 0,
+      path: "none",
+      contentLength: 0,
+      mqttWebConfigEmpty: false,
+      fbDtsgPresent: false,
+      lsdPresent: false,
+      hasLoginForm: false,
+      hasCheckpoint: false,
+    };
+    
+    let apiError = lastResponse ? extractFacebookApiError(lastResponse.body) : null;
+    
     if (apiError !== null) {
       const summary = summarizeHomeDiagnostics(diag);
-      this.#logger.warn(
+      this.#logger.error(
         { operation: "login", code: apiError.code, status: diag.status, bytes: diag.contentLength },
-        "Facebook returned a structured error for the home page",
+        "Facebook returned a structured error after trying all endpoints",
       );
+      
       if (apiError.code === "AUTH_REFRESH_REQUIRED") {
         void this.#handleSessionExpired("expired");
         throw new AuthenticationError(
-          `Facebook rejected the session — session is too stale to reuse (error 1357004); re-export your cookies from a browser that is actually logged in (${summary})`,
+          `Facebook rejected the session across all endpoints (error 1357004). Your cookies are too old or the account logged out elsewhere. Export fresh cookies from an active browser session. (${summary})`,
           "AUTH_REFRESH_REQUIRED",
           {
             retryable: false,
@@ -2436,6 +2646,7 @@ export class MessengerClient {
           },
         );
       }
+      
       throw new AuthenticationError(
         `Facebook rejected the session — ${apiError.message} (${summary})`,
         apiError.code,
@@ -2446,32 +2657,35 @@ export class MessengerClient {
       );
     }
 
-    // The logged-out splash screen carries no tokens by design; detect it
-    // precisely instead of trying to extract what isn't there.
+    // The logged-out splash screen carries no tokens by design
     if (diag.mqttWebConfigEmpty) {
       const summary = summarizeHomeDiagnostics(diag);
-      this.#logger.warn(
+      this.#logger.error(
         { operation: "login", ...diag },
-        "Facebook returned the logged-out splash screen for this session",
+        "Facebook returned the logged-out splash screen on all endpoints",
       );
       throw new AuthenticationError(
-        `Facebook rejected the session — home.php returned the logged-out page (${summary}); re-export your cookies from a browser that is actually logged in`,
+        `Facebook session is not logged in. All endpoints returned logged-out pages. Export cookies from a browser where you are actively logged into Facebook. (${summary})`,
         "AUTH_SESSION_EXPIRED",
         { retryable: false, context: { operation: "login", ...diag } },
       );
     }
 
-    const isLoginPage =
-      response.url.includes("/login") ||
-      response.url.includes("/checkpoint") ||
-      response.url.includes("/two_step_verification") ||
-      diag.hasLoginForm ||
-      diag.hasCheckpoint;
+    // Check for login page redirect
+    const isLoginPage = lastResponse
+      ? lastResponse.url.includes("/login") ||
+        lastResponse.url.includes("/checkpoint") ||
+        lastResponse.url.includes("/two_step_verification") ||
+        diag.hasLoginForm ||
+        diag.hasCheckpoint
+      : false;
+      
     if (isLoginPage) {
-      const isCheckpoint =
-        response.url.includes("/checkpoint") ||
-        response.url.includes("/two_step_verification") ||
-        diag.hasCheckpoint;
+      const isCheckpoint = lastResponse
+        ? lastResponse.url.includes("/checkpoint") ||
+          lastResponse.url.includes("/two_step_verification") ||
+          diag.hasCheckpoint
+        : false;
       const summary = summarizeHomeDiagnostics(diag);
       throw new AuthenticationError(
         isCheckpoint
@@ -2482,34 +2696,28 @@ export class MessengerClient {
           retryable: false,
           context: {
             operation: "login",
-            url: response.url,
+            url: lastResponse?.url ?? "unknown",
             isCheckpoint,
             ...diag,
           },
         },
       );
     }
-    const tokens = scrapeTokens(response.body, this.#requireUserId());
-    if (tokens === null) {
-      const summary = summarizeHomeDiagnostics(diag);
-      this.#logger.warn(
-        { operation: "login", ...diag },
-        "token scrape failed — no token payloads found on the home page",
-      );
-      throw new AuthenticationError(
-        `Could not read Facebook's session tokens from the home page (${summary})`,
-        "AUTH_LOGIN_REJECTED",
-        {
-          retryable: false,
-          context: { operation: "login", ...diag },
-        },
-      );
-    }
-    this.#logger.debug(
-      { operation: "login", region: tokens.region, hasIrisSeqId: tokens.irisSeqId !== null },
-      "session tokens scraped",
+    
+    // No tokens found anywhere
+    const summary = summarizeHomeDiagnostics(diag);
+    this.#logger.error(
+      { operation: "login", ...diag },
+      "Could not scrape tokens from any Facebook endpoint",
     );
-    return tokens;
+    throw new AuthenticationError(
+      `Could not read Facebook's session tokens from any endpoint (desktop home, mobile home, mobile root). Your cookies may be corrupted or too old. Export fresh cookies from a browser where you are actively logged into Facebook. (${summary})`,
+      "AUTH_LOGIN_REJECTED",
+      {
+        retryable: false,
+        context: { operation: "login", ...diag },
+      },
+    );
   }
 
   #applyTokens(tokens: ScrapedTokens): void {
@@ -2531,24 +2739,31 @@ export class MessengerClient {
   }
 
   /**
-   * Rotates a stale-but-valid session: scrapes fresh `fb_dtsg`/`jazoest`
-   * from multiple Facebook surfaces (mobile, desktop, touch).
-   * This mirrors the web clients' recovery for error 1357004 ("please
-   * refresh") — the same technique fca-unofficial uses in refreshFb_dtsg.
+   * Rotates a stale-but-valid session: scrapes a fresh `fb_dtsg` from
+   * multiple Facebook surfaces.
+   *
+   * A surface only counts as refreshed when a DTSG-anchored token is
+   * actually present in the returned page. A surface is rejected when it
+   * serves Facebook's structured error envelope (e.g. the small 1357004
+   * "session too stale" JSON document), a logged-out page, or a redirect
+   * to login/checkpoint — those responses carry no usable token. jazoest
+   * is always derived from fb_dtsg, exactly like the web client computes
+   * it. (No special "mobile browser" user agent is sent — the cookies are
+   * what matter, and inventing one made refreshes unverifiable.)
    *
    * Best-effort by design: if Facebook refuses to serve tokens even with
    * the cookies, the session is revoked beyond recovery and this returns
    * false. Never logs or persists token values.
-   * 
-   * Updated to try multiple endpoints for better compatibility (2024).
    */
   async #refreshSessionTokens(http: HttpTransport): Promise<boolean> {
     const surfaces = [
       { url: "https://m.facebook.com/", name: "mobile" },
-      { url: "https://www.facebook.com/", name: "desktop" },
+      { url: "https://m.facebook.com/home.php", name: "mobile-home" },
       { url: "https://touch.facebook.com/", name: "touch" },
+      { url: "https://www.facebook.com/", name: "desktop" },
+      { url: `${FB_BASE_URL}/`, name: "base" },
     ];
-    
+
     for (const surface of surfaces) {
       let response;
       try {
@@ -2559,14 +2774,49 @@ export class MessengerClient {
           headers: { accept: HTML_ACCEPT_HEADER },
         });
       } catch (error) {
-        this.#logger.warn(
+        this.#logger.debug(
           { operation: "refreshSessionTokens", surface: surface.name, err: errorMessage(error) },
           `${surface.name} surface request failed during token refresh`,
         );
         continue; // Try next surface
       }
-      
-      const tokens = extractMobileTokens(response.body);
+
+      // Facebook's structured error envelope (e.g. the small 1357004
+      // "session too stale" document) — this response carries no usable
+      // token, ever. Check it before anything else.
+      const apiError = extractFacebookApiError(response.body);
+      if (apiError !== null) {
+        this.#logger.debug(
+          { operation: "refreshSessionTokens", surface: surface.name, code: apiError.code, bytes: response.body.length },
+          `${surface.name} surface returned a structured Facebook error (${apiError.code}) — session is stale or revoked`,
+        );
+        continue;
+      }
+
+      // Logged-out splash screen — no tokens by design.
+      if (isLoggedOutHomePage(response.body)) {
+        this.#logger.debug(
+          { operation: "refreshSessionTokens", surface: surface.name },
+          `${surface.name} returned logged-out page`,
+        );
+        continue;
+      }
+
+      // Redirected to login/checkpoint — the session is not usable here.
+      const finalUrl = response.url ?? "";
+      if (
+        finalUrl.includes("/login") ||
+        finalUrl.includes("/checkpoint") ||
+        finalUrl.includes("/two_step_verification")
+      ) {
+        this.#logger.debug(
+          { operation: "refreshSessionTokens", surface: surface.name },
+          `${surface.name} redirected to login/checkpoint`,
+        );
+        continue;
+      }
+
+      const tokens = extractSessionTokens(response.body);
       if (tokens !== null) {
         const current = http.tokens;
         http.setTokens({
@@ -2579,22 +2829,21 @@ export class MessengerClient {
         });
         this.#logger.info(
           { operation: "refreshSessionTokens", surface: surface.name },
-          `refreshed fb_dtsg/jazoest from ${surface.name} surface`,
+          `Refreshed fb_dtsg from ${surface.name} surface`,
         );
-        this.#debug("login", `refreshed fb_dtsg/jazoest from the ${surface.name} surface`, {});
         return true;
       }
       
-      this.#logger.warn(
+      this.#logger.debug(
         { operation: "refreshSessionTokens", surface: surface.name, status: response.status },
-        `${surface.name} surface yielded no fb_dtsg/jazoest to refresh the session`,
+        `${surface.name} surface yielded no fb_dtsg`,
       );
     }
-    
+
     // All surfaces failed
-    this.#logger.warn(
+    this.#logger.error(
       { operation: "refreshSessionTokens" },
-      "no valid fb_dtsg/jazoest found on any surface (mobile, desktop, touch) - session is dead",
+      "Failed to refresh fb_dtsg from any surface — Facebook rejected the session; re-export cookies from a browser that is actively logged in",
     );
     return false;
   }

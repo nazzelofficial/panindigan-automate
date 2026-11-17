@@ -8,11 +8,11 @@
 import { describe, expect, it } from "vitest";
 import {
   extractFacebookApiError,
-  extractMobileTokens,
+  extractSessionTokens,
   isLoggedOutHomePage,
   safeHomeDiagnostics,
   summarizeHomeDiagnostics,
-} from "../src/client/home.js";
+} from "../src/client/index.js";
 
 /** Facebook's logged-out SSR splash: empty MqttWebConfig with fbid "0". */
 const LOGGED_OUT_SPLASH = `<html><body><script>require("Bootloader")(["MqttWebConfig",[],{"fbid":"0","appID":219994525426954,"endpoint":""}])</script></body></html>`;
@@ -134,34 +134,71 @@ describe("extractFacebookApiError", () => {
   });
 });
 
-describe("extractMobileTokens", () => {
-  it("scrapes fb_dtsg and jazoest from the server-rendered hidden inputs", () => {
+describe("extractSessionTokens", () => {
+  it("scrapes fb_dtsg from the server-rendered hidden inputs", () => {
     const html =
       '<html><body><form><input type="hidden" name="fb_dtsg" value="AbCdEf123_TOKEN" autocomplete="off" />' +
       '<input type="hidden" name="jazoest" value="28911" autocomplete="off" /></form></body></html>';
 
-    const tokens = extractMobileTokens(html);
+    const tokens = extractSessionTokens(html);
     expect(tokens).not.toBeNull();
     expect(tokens?.fbDtsg).toBe("AbCdEf123_TOKEN");
-    expect(tokens?.jazoest).toBe("28911");
+    // jazoest is always derived from fb_dtsg, never scraped
+    expect(tokens?.jazoest).toMatch(/^2\d+$/);
   });
 
-  it("derives jazoest from fb_dtsg when the page omits the hidden input", () => {
-    const html = '<input type="hidden" name="fb_dtsg" value="abc123" />';
+  it("derives jazoest from fb_dtsg (sum of char codes, prefixed with 2)", () => {
+    const html = '<input type="hidden" name="fb_dtsg" value="abc123XYZ_TOKEN" />';
 
-    const tokens = extractMobileTokens(html);
+    const tokens = extractSessionTokens(html);
     expect(tokens).not.toBeNull();
-    expect(tokens?.fbDtsg).toBe("abc123");
-    // computeJazoest: sum of char codes, prefixed with "2"
+    expect(tokens?.fbDtsg).toBe("abc123XYZ_TOKEN");
     expect(tokens?.jazoest).toMatch(/^2\d+$/);
   });
 
   it("returns null when there is no fb_dtsg hidden input", () => {
-    expect(extractMobileTokens("<html><body>nothing</body></html>")).toBeNull();
+    expect(extractSessionTokens("<html><body>nothing</body></html>")).toBeNull();
   });
 
   it("returns null when fb_dtsg is present but empty", () => {
-    expect(extractMobileTokens('<input type="hidden" name="fb_dtsg" value="" />')).toBeNull();
+    expect(extractSessionTokens('<input type="hidden" name="fb_dtsg" value="" />')).toBeNull();
+  });
+
+  it("scrapes fb_dtsg from the modern DTSGInitialData requireLazy payload", () => {
+    const html =
+      '<script>{"require":[["DTSGInitialData",[],{"token":"26031076_MOCK_DTSG_TOKEN_1234567890"}]]}</script>';
+
+    const tokens = extractSessionTokens(html);
+    expect(tokens).not.toBeNull();
+    expect(tokens?.fbDtsg).toBe("26031076_MOCK_DTSG_TOKEN_1234567890");
+  });
+
+  it("scrapes fb_dtsg from the older DTSGInitData key variant", () => {
+    const html = '<script>["DTSGInitData",[],{"token":"26031076_MOCK_DTSG_TOKEN_1234567890"}]</script>';
+
+    const tokens = extractSessionTokens(html);
+    expect(tokens).not.toBeNull();
+    expect(tokens?.fbDtsg).toBe("26031076_MOCK_DTSG_TOKEN_1234567890");
+  });
+
+  it("returns null for a bare token-shaped value with no DTSG context", () => {
+    // Regression: an earlier implementation matched any `"token": "<20+ chars>"`
+    // anywhere in the page, which reported a successful refresh on pages that
+    // carried no session tokens at all.
+    const html =
+      '<html><body><script>{"require":[["SomeOtherModule",[],{"token":"AAsfQkpTOVjFBBWtGLesU0QY1gX9XYZ123"}]]}</script></body></html>';
+
+    expect(extractSessionTokens(html)).toBeNull();
+  });
+
+  it("returns null for the exact production 1357004 error envelope", () => {
+    // The response Facebook actually served the deployment: HTTP 200,
+    // ~249 bytes, JSON error envelope. No tokens exist in it.
+    const envelope =
+      '{"error":1357004,"errorSummary":"Please Refresh","errorDescription":"Please try closing and re-opening your browser window.","errorIsRetryable":true}';
+
+    expect(extractSessionTokens(envelope)).toBeNull();
+    expect(extractFacebookApiError(envelope)?.code).toBe("AUTH_REFRESH_REQUIRED");
   });
 
   it("handles real-world mobile surface HTML structure", () => {
@@ -175,13 +212,13 @@ describe("extractMobileTokens", () => {
         <input type="hidden" name="try_number" value="0" />
         <input type="hidden" name="unrecognized_tries" value="0" />
         <input type="hidden" name="bi_xrwh" value="0" />
-        <input type="hidden" name="fb_dtsg" value="RealToken123:456:789" />
+        <input type="hidden" name="fb_dtsg" value="RealToken123_456_7890:abc:def" />
       </form>
     `;
 
-    const tokens = extractMobileTokens(html);
+    const tokens = extractSessionTokens(html);
     expect(tokens).not.toBeNull();
-    expect(tokens?.fbDtsg).toBe("RealToken123:456:789");
-    expect(tokens?.jazoest).toBe("21234");
+    expect(tokens?.fbDtsg).toBe("RealToken123_456_7890:abc:def");
+    expect(tokens?.jazoest).toMatch(/^2\d+$/);
   });
 });

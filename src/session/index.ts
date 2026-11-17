@@ -13,9 +13,11 @@
 
 import { z } from "zod";
 import type { SerializedCookieJar } from "tough-cookie";
+import { existsSync, statSync } from "node:fs";
 import {
   COOKIE_REFRESH_CHECK_INTERVAL_MS,
   COOKIE_REFRESH_LEAD_TIME_MS,
+  REQUIRED_COOKIES,
   STORAGE_KEYS,
 } from "../constants.js";
 import { CookieStore, parseCredentials } from "../auth/index.js";
@@ -213,10 +215,25 @@ export class SessionManager {
    * Parses credentials, validates the required cookies, loads any persisted
    * session, and enters `AUTHENTICATING`.
    *
-   * A persisted cookie jar is preferred over the supplied credentials when it
-   * belongs to the same account and still passes validation — background
-   * refreshes keep it newer than the file most callers pass in. The persisted
-   * cursor and region are restored whenever the account matches.
+   * Cookie-jar selection rules (this is the part most callers get wrong):
+   * - The supplied credentials are always validated first.
+   * - A persisted jar is preferred ONLY when it belongs to the same account,
+   *   still passes validation, AND matches the supplied jar on the required
+   *   cookies (`c_user`/`xs`/`datr`) — e.g. only a background refresh
+   *   happened since the last boot.
+   * - When any required cookie differs and the credentials were supplied as
+   *   an existing file path, the file wins only if it is newer than the last
+   *   persisted write (`mtime > savedAt`). A re-exported appstate therefore
+   *   always beats the dead persisted jar; a stale file that is older than
+   *   the last persist still loses to the background-refreshed jar
+   *   (the old behavior this preserves).
+   * - When any required cookie differs and the credentials were supplied
+   *   as an object/array/env string (no file to compare), the supplied
+   *   credentials win — a caller-provided credential change is intentional.
+   *
+   * The choice is logged as `cookieSource: "credentials" | "storage"`.
+   *
+   * The persisted cursor and region are restored whenever the account matches.
    */
   async prepareLogin(credentials: Credentials): Promise<PreparedLogin> {
     const providedCookies = await parseCredentials(credentials);
@@ -230,7 +247,39 @@ export class SessionManager {
     if (compatible && persisted !== null) {
       const restored = this.#tryRestoreCookies(persisted.cookies, userId);
       if (restored !== null) {
-        store = restored;
+        const sameRequired = REQUIRED_COOKIES.every(
+          (name) => restored.getCookieValue(name) === providedStore.getCookieValue(name),
+        );
+        if (sameRequired) {
+          // Only a background refresh happened since the last boot — the
+          // persisted jar is at least as fresh as the file callers pass in.
+          store = restored;
+        } else if (
+          typeof credentials === "string" &&
+          existsSync(credentials) &&
+          statSync(credentials).mtimeMs <= persisted.savedAt
+        ) {
+          // The file is older than the last persist — keep the jar that the
+          // library background-refreshed rather than reverting to the file.
+          this.#logger.info(
+            { operation: "prepareLogin" },
+            "supplied appstate is older than the last persisted refresh — using the persisted session",
+          );
+          store = restored;
+        } else {
+          // The caller handed us different credentials: a re-exported
+          // appstate (newer mtime), or credentials not backed by a file at
+          // all. The supplied credentials are intentional — they win.
+          this.#logger.info(
+            { operation: "prepareLogin" },
+            "supplied credentials differ from the persisted session — using the supplied appstate",
+          );
+        }
+      } else {
+        this.#logger.info(
+          { operation: "prepareLogin" },
+          "persisted session failed validation — using the supplied appstate",
+        );
       }
     }
 

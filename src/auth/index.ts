@@ -402,6 +402,16 @@ export class CookieStore {
     }
   }
 
+  /** The value of a named cookie, or `null` when absent. Internal use only — never logged. */
+  getCookieValue(name: string): string | null {
+    for (const cookie of this.#jar.getCookiesSync(FACEBOOK_URL)) {
+      if (cookie.key === name) {
+        return cookie.value;
+      }
+    }
+    return null;
+  }
+
   /** The value of the `c_user` cookie, or `null` when absent. */
   getUserId(): string | null {
     for (const cookie of this.#jar.getCookiesSync(FACEBOOK_URL)) {
