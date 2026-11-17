@@ -3,7 +3,17 @@
 Complete reference for `MessengerClient`, the primary entry point for Panindigan Automate.
 
 ```ts
-import { MessengerClient } from "panindigan-automate";
+import { login } from "panindigan-automate";
+
+const client = await login("./appstate.json");
+```
+
+The main entry is `login()`; the modern `MessengerClient` constructor below is fully supported for explicit construction and the `ready` event. Both share the same event surface.
+
+```ts
+// Equivalent
+const client = new MessengerClient();
+await client.login("./appstate.json");
 ```
 
 ---
@@ -23,6 +33,9 @@ import { MessengerClient } from "panindigan-automate";
 - [Middleware](#middleware)
 - [Plugins](#plugins)
 - [Diagnostics](#diagnostics)
+- [Stealth Guard](#stealth-guard)
+- [E2EE](#e2ee)
+- [Update checker](#update-checker)
 - [Events](#events)
 
 ---
@@ -57,10 +70,56 @@ Creates a new `MessengerClient` instance.
 | `storageDirectory` | `string` | `"./panindigan-session"` | File storage path for the file adapter. |
 | `validateOnLogin` | `boolean` | `true` | Validates the session with Facebook before resolving `login()`. |
 | `plugins` | `PluginRegistration[]` | `[]` | Plugins registered at construction. |
+| `stealth` | `Partial<StealthConfig>` | see below | Stealth Guard overrides. `{ enabled: false }` disables; `caps`, `limits`, `pacingEnabled`, `signalThreshold`, `signalWindow`, `cooldownMs`, `warmupDays`, `basePacingMs`, `jitterPercent`, `warmupEnabled`, `capWarningDelayMultiplier` are all adjustable. |
+| `dryRun` | `boolean` | `false` | Every outbound operation logs its payload summary; nothing reaches the network. |
+| `e2ee` | `"auto" \| "require" \| "off" \| { enabled?, require?, autoConnect?, selfListen?, deviceListCacheMs?, deviceStorePath? }` | `"off"` | E2EE for 1:1 threads (port of fbapi-unofficial, MIT). `"auto"` connects at login; `"require"` fails login without the encrypted channel; object form for fine-grained control. |
+| `update` | `{ enabled?, checkIntervalMs? }` | `{ enabled: false }` | Update checker. Announce-only; install is explicit. |
+
+Default stealth configuration:
+
+```ts
+{
+  enabled: true,
+  signalThreshold: 3,
+  signalWindow: 600_000,      // 10 min
+  cooldownMs: 86_400_000,     // 24 h
+  warmupEnabled: true,
+  warmupDays: 7,              // ramp 30% → 100%
+  basePacingMs: 1200,
+  jitterPercent: 0.5,
+  pacingEnabled: true,
+  capWarningDelayMultiplier: 2,
+  caps: { perThreadPerHour: 30, globalPerHour: 100, globalPerDay: 200 },
+  limits: {
+    sendMessage: { burst: 10, sustained: 30, refillRate: 30 / 3600 },
+    addReaction: { burst: 20, sustained: 100, refillRate: 100 / 3600 },
+    createGroup: { burst: 2, sustained: 5, refillRate: 5 / 3600 },
+    global: { burst: 50, sustained: 200, refillRate: 200 / 3600 },
+  },
+}
+```
 
 ---
 
 ## Lifecycle & Session
+
+### `login(credentials, options?, callback?)` — top-level function, main entry
+
+```ts
+import { login } from "panindigan-automate";
+
+const client = await login("./appstate.json");
+```
+
+Authenticates exactly like `client.login(credentials)` but is exposed as a top-level call for the main documented entry.
+
+- **Overloads**: `login(credentials): Promise<MessengerClient>` · `login(credentials, options): Promise<MessengerClient>` · `login(credentials, options, callback): void` where `callback = (error: Error | null, client?: MessengerClient) => void`.
+- **`options`**: the same `ClientOptions` accepted by `new MessengerClient(options)`.
+- **Returns**: the connected `MessengerClient` when the promise resolves.
+
+```ts
+const client = await login("./appstate.json", { e2ee: "auto" });
+```
 
 ### `client.login(credentials)`
 
@@ -229,9 +288,9 @@ Fetches message history through GraphQL document `1498317363570230`, newest firs
 - **Options**: `limit` (default `20`, max `100`), `before` (epoch milliseconds).
 - **Returns**: `Promise<MessageListResult>` — `{ messages, hasMore }`.
 
-### `client.muteThread(threadId)` / `client.unmuteThread(threadId)`
+### `client.muteThread(threadId, duration?)` / `client.unmuteThread(threadId)`
 
-Mutes or unmutes notifications for a thread.
+Mutes or unmutes notifications for a thread. `duration` is a whole number of minutes (1–525600) or `"always"` for the web client's indefinite mute (`mute_settings: "-1"`); default is `"always"`. Threads unmuted explicitly or automatically (leave the thread) return to `"0"`.
 
 ### `client.archiveThread(threadId)` / `client.unarchiveThread(threadId)`
 
@@ -266,7 +325,7 @@ Renames a group thread.
 
 ### `client.changeGroupPhoto(threadId, file)`
 
-Uploads and sets the group photo.
+Uploads and sets the group photo. Alias: `client.changeGroupAvatar(threadId, file)` — same behavior.
 
 ### `client.changeGroupEmoji(threadId, emoji)`
 
@@ -274,7 +333,11 @@ Changes the group's default reaction emoji.
 
 ### `client.changeGroupTheme(threadId, color)`
 
-Changes the group theme. `color` is a `THREAD_COLORS` name (`"MessengerBlue"`, `"NeonGreen"`, …) or a 6-digit hex value.
+Changes the group theme. `color` is a `getThreadColorList()` name (case-insensitive) or a raw numeric theme id — arbitrary hex is rejected by Facebook since ~2019. Returns the frozen registry from `client.getThreadColorList()` for reference.
+
+### `client.createInviteLink(threadId)` / `client.joinGroupByLink(link)`
+
+**`NotImplementedError`.** No publicly verifiable invite-link endpoint exists; no maintained client implements one either. Use the Facebook app for links.
 
 ### `client.changeAdminStatus(threadId, userId, isAdmin)`
 
@@ -385,7 +448,7 @@ client.use(
 );
 ```
 
-The context exposes `operation`, `request` (`url`, `method`, `headers`), `response`, `error`, and `metadata`. See [Middleware](middleware.md).
+The context exposes `operation`, `request` (`url`, `method`, `headers`), `response`, `error`, and `metadata`.
 
 ---
 
@@ -399,7 +462,7 @@ const client = new MessengerClient({
 });
 ```
 
-The `Plugin` contract exposes `name`, `version`, and optional `onLoad`, `onEnable`, `onDisable`, `onReload`, `onDestroy`. See [Plugins](plugins.md).
+The `Plugin` contract exposes `name`, `version`, and optional `onLoad`, `onEnable`, `onDisable`, `onReload`, `onDestroy`.
 
 ---
 
@@ -407,12 +470,83 @@ The `Plugin` contract exposes `name`, `version`, and optional `onLoad`, `onEnabl
 
 ### `client.diagnostics.getSnapshot()` / `client.diagnostics.reset()`
 
-Returns or zeroes the diagnostics snapshot: HTTP request counts/latency/retries, MQTT heartbeat/reconnect/queue counters, cache hit rate, per-event counts and throughput, and process memory.
+Returns or zeroes the diagnostics snapshot: HTTP request counts/latency/retries, MQTT heartbeat/reconnect/queue counters, cache hit rate, per-event counts and throughput, and process memory — plus a `stealth` section (guard circuit state, caps, warmup, health score, thread heat, guard audit log) because the Stealth Guard wires itself into diagnostics.
 
 ```ts
 const snapshot = client.diagnostics.getSnapshot();
 console.log(snapshot.http.requests.total, snapshot.mqtt.heartbeat.avgMs, snapshot.cache.hitRate);
+console.log(snapshot.stealth?.circuitState, snapshot.stealth?.healthScore, snapshot.stealth?.caps);
 ```
+
+### `client.diagnostics.exportJSON()` / `client.diagnostics.exportHTML()`
+
+Self-contained exports for attaching to incidents. The JSON export round-trips through `JSON.parse`; the HTML export is a single inline file with no external requests.
+
+**Setting `PANINDIGAN_DEBUG=1`** writes `debug-report.json` (error + diagnostics) on an uncaught exception.
+
+---
+
+## Stealth Guard
+
+### `client.stealth`
+
+The Stealth Guard singleton: `client.stealth.getState()`, `client.stealth.reset()`, `client.stealth.getAudit()`, `client.stealth.capsSnapshot()`.
+
+- **`getState()`** — `{ circuitState, haltedAt, signals[], warmupDay, hourWindow, dayWindow, sessionStartMs }`.
+- **`reset()`** — manual reset; refuses until the cooldown expires. Returns `boolean`.
+- **`getAudit()`** — ring buffer of the last 200 guard decisions (`allow`, `deny`, `halt`, `cap_warning`, `cap_reached`, `checkpoint`, `reset`) with reasons.
+- **`capsSnapshot()`** — `{ hour: { count, limit, level }, day: { count, limit, level } }`, `level` is `"ok" | "warning" | "reached"`.
+
+Events emitted by the guard: `suspension_warning` (a signal was observed), `suspension_halt` (circuit opened), `suspension_reset` (manual reset), `checkpoint` (identity verification demanded), `health_warning` / `health_critical` (health score crossed a threshold), `risk_rising` (send volume accelerating), `session_dead` (the session died and could not be re-validated). All rejections throw `AccountRestrictedError` with code `ACCOUNT_RESTRICTED`.
+
+---
+
+## E2EE
+
+### `client.e2ee`
+
+The 1:1 E2EE client — a faithful port of [bhhoang/fbapi-unofficial](https://github.com/bhhoang/fbapi-unofficial)'s `src/e2ee/` (MIT) into this package's source, with per-file attribution. `null` unless enabled via `e2ee` in the client options.
+
+Config (string shorthand or object):
+
+- `"off"` (default) — E2EE disabled
+- `"auto"` — enabled; connects at login; failure downgrades to a `warning` event
+- `"require"` — enabled; login fails if the encrypted channel cannot be established
+- Object: `{ enabled?, require?, autoConnect?, selfListen?, deviceListCacheMs?, deviceStorePath? }`
+  - `deviceStorePath` — defaults to `<storageDirectory>/e2ee_device.json`. **Keep the file** — deleting it re-registers a new device under your account.
+
+Public surface:
+
+- `connect(): Promise<void>` — opens the Noise XX encrypted channel and registers/loads the E2EE device
+- `disconnect(): Promise<void>` — closes the channel and stops heartbeat/prekey sync
+- `isConnected(): boolean`
+- `deviceId: number | null`
+- `store: DeviceStore | null` — the persisted identity (tests/diagnostics)
+- `sendTextMessage(threadId, text): Promise<{ messageId, timestamp }>` — sealed send, 1:1 only
+
+- `sendEncryptedMessage(threadId, text)` (on `MessengerClient`) — the same send through the guard, dry-run aware, with thread-kind validation. Group threads throw `NotImplementedError`.
+
+Events: `e2ee_message` (incoming text), `e2ee_message_edit`, `e2ee_message_reaction`; unsends surface as `message_unsend`. Payload marker field `isE2EE: true`.
+
+**Scope in this release:** 1:1 text only. Group chats (sender keys), E2EE attachments and encrypted backup restore are **not implemented**.
+
+**Honest status:** the offline tests pass (WA/protobuf codec, RFC 5869 HKDF, XEdDSA sign/verify, full X3DH round trip between two device stores, Noise XX client handshake against an in-memory reference server). **Live behavior against real Facebook has not been verified by the authors.** Treat the feature as experimental; connecting registers an E2EE device on the account.
+
+---
+
+## Update checker
+
+### `client.update`
+
+Announce-only until `update.enabled: true`, at most one registry hit per `checkIntervalMs` (default 24h).
+
+```ts
+const info = await client.update.check();      // null when disabled/too recent/up to date
+if (info) console.log(`${info.current} → ${info.latest}`);
+const result = await client.update.install();  // explicit: plan → backup → install → rollback on failure
+```
+
+`client.update.install()` requires a process restart; the caller decides when to restart.
 
 ---
 
@@ -456,3 +590,14 @@ unsubscribe();
 | `warning` | `WarningEvent` | Non-fatal issue. |
 | `debug` | `DebugEvent` | Internal debug output at `debug`/`trace` log levels. |
 | `raw` | `RawDeltaEvent` | Every MQTT payload before parsing. |
+| `suspension_warning` | `SuspensionWarningEvent` | A suspension signal was observed (or a cap crossed 80%). |
+| `suspension_halt` | `SuspensionHaltEvent` | The guard froze outbound sends (circuit open / cap reached). |
+| `suspension_reset` | `SuspensionResetEvent` | Manual guard reset succeeded after the cooldown. |
+| `checkpoint` | `CheckpointEvent` | Facebook demanded an identity verification. |
+| `health_warning` | `HealthWarningEvent` | Session health dropped below 50. |
+| `health_critical` | `HealthCriticalEvent` | Session health dropped below 25. |
+| `session_dead` | `SessionDeadEvent` | Session died mid-run and could not be re-validated. |
+| `risk_rising` | `RiskRisingEvent` | Send volume is accelerating toward restriction risk. |
+| `e2ee_message` | `E2eeMessageEvent` | Incoming 1:1 E2EE text (`isE2EE: true`). E2EE must be enabled; group threads are not supported. |
+| `e2ee_message_edit` | `E2eeMessageEditEvent` | An encrypted message was edited (`isE2EE: true`). |
+| `e2ee_message_reaction` | `E2eeMessageReactionEvent` | A reaction on an encrypted message (`isE2EE: true`). |

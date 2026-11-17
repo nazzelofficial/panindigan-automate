@@ -9,6 +9,9 @@
  * level. Everything here is always observable.
  */
 
+import { computeJazoest, interpretFacebookError, parseFacebookJson } from "../transport/http/index.js";
+import type { LibraryError } from "../errors/index.js";
+
 /** Boolean summary of what the home page contains. Never includes values. */
 export interface HomePageDiagnostics {
   /** HTTP status code of the home/refresh request. */
@@ -67,9 +70,6 @@ export function safeHomeDiagnostics(
   };
 }
 
-import { interpretFacebookError, parseFacebookJson } from "../transport/http/index.js";
-import type { LibraryError } from "../errors/index.js";
-
 /** One-line, safe summary suitable for log lines and error messages. */
 export function summarizeHomeDiagnostics(diagnostics: HomePageDiagnostics): string {
   return [
@@ -99,4 +99,29 @@ export function extractFacebookApiError(body: string): LibraryError | null {
     return null;
   }
   return interpretFacebookError("home", parsed);
+}
+
+/** Shape of the fresh tokens scraped from the mobile surface. */
+export interface MobileTokens {
+  readonly fbDtsg: string;
+  readonly jazoest: string;
+}
+
+/**
+ * @deprecated This function is no longer used internally as of v0.1.7.
+ * Mobile token refresh does not work for expired sessions in modern Facebook.
+ * Kept for backward compatibility only.
+ * 
+ * Scrapes `fb_dtsg` and `jazoest` from the server-rendered mobile surface
+ * (`m.facebook.com/`). Facebook renders these as hidden inputs, which is how
+ * the web/mobile clients refresh stale sessions (error 1357004).
+ */
+export function extractMobileTokens(html: string): MobileTokens | null {
+  const fbDtsg = html.match(/name="fb_dtsg"\s+value="([^"]+)"/)?.[1];
+  if (fbDtsg === undefined || fbDtsg === "") {
+    return null;
+  }
+  const jazoest =
+    html.match(/name="jazoest"\s+value="([^"]+)"/)?.[1] ?? computeJazoest(fbDtsg);
+  return { fbDtsg, jazoest };
 }

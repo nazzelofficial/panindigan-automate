@@ -9,7 +9,7 @@
  * drops, parse warnings, reconnect exhaustion) surface as events instead.
  */
 
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import {
   BATCH_NAMES,
   CACHE_TAGS,
@@ -18,17 +18,23 @@ import {
   FB_BASE_URL,
   FB_LS_APP_ID,
   THREAD_COLORS,
+  THREAD_COLOR_REGISTRY,
   TOPIC_LS_REQ,
   TOPIC_MARK_THREAD,
+  VERSION,
 } from "../constants.js";
+import { writeFileSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
 import { DeltaProcessor, type DeltaSink } from "../delta/index.js";
 import { asArray, asRecord, toMillis, toNumber } from "../delta/raw.js";
 import { DiagnosticsCollector } from "../diagnostics/index.js";
 import {
+  AccountRestrictedError,
   APIError,
   AuthenticationError,
   LibraryError,
   MQTTError,
+  NotImplementedError,
   SessionError,
   TimeoutError,
   ValidationError,
@@ -54,9 +60,20 @@ import { postGraphQL, postGraphQLBatch, postWebGraphQLMutation, type GraphQLBatc
 import { resolvePhotoUrl, uploadMedia } from "./media.js";
 import {
   extractFacebookApiError,
+  extractMobileTokens,
   safeHomeDiagnostics,
   summarizeHomeDiagnostics,
 } from "./home.js";
+import { StealthGuard, type SuspensionSignal, type StealthState } from "../stealth/index.js";
+import { detector } from "../stealth/detector.js";
+import { IdempotencyManager } from "../stealth/idempotency.js";
+import { MessageChunker, sleep } from "../stealth/chunking.js";
+import { HealthScoreCalculator } from "../stealth/health-score.js";
+import { TokenRefreshManager } from "../stealth/token-refresh.js";
+import { MQTTWatchdog } from "../stealth/watchdog.js";
+import { E2EEClient } from "../e2ee/client.js";
+import type { E2EEIncomingEvent } from "../e2ee/client.js";
+import { UpdateChecker } from "../update/index.js";
 import {
   messageEventFromNode,
   messageFromEvent,
@@ -90,6 +107,7 @@ import {
 } from "./validation.js";
 import { resolveConfig, type ResolvedConfig } from "../config/index.js";
 import type {
+  Attachment,
   AttachmentType,
   ClientOptions,
   Credentials,
@@ -115,6 +133,7 @@ import type {
   PresenceInfo,
   Reaction,
   SessionInfo,
+  StealthDiagnostics,
   StorageAdapter,
   ThreadInfo,
   ThreadListOptions,
@@ -346,6 +365,25 @@ export class MessengerClient {
   readonly #pollQuestions = new Map<string, string>();
   readonly #presence = new Map<string, PresenceInfo>();
   readonly #mediaCache = new Map<string, MediaInfo>();
+  /** Per-thread activity for the heat index (G4) — counts and recency only. */
+  readonly #threadHeat = new Map<string, { count: number; lastMs: number }>();
+
+  readonly #stealth: StealthGuard;
+  readonly #health: HealthScoreCalculator;
+  readonly #idempotency: IdempotencyManager;
+  readonly #chunker: MessageChunker;
+  readonly #tokenRefresh: TokenRefreshManager;
+  readonly #watchdog: MQTTWatchdog;
+  /** Resolved E2EE options (enabled at construction time). */
+  readonly #e2eeConfig: ResolvedE2EEOptions;
+  /** The live encrypted channel; `null` while disabled or before `login()`. */
+  #e2eeClient: E2EEClient | null = null;
+  #updateChecker: UpdateChecker | null = null;
+  readonly #updateOptions?: { readonly enabled?: boolean | undefined; readonly checkIntervalMs?: number | undefined } | undefined;
+  readonly #dryRun: boolean;
+  readonly #stealthEnabled: boolean;
+  /** Re-entrancy guard for the expiry handler (see #handleSessionExpired). */
+  #expiryHandling = false;
 
   constructor(options: ClientOptions = {}) {
     this.#config = resolveConfig(options);
@@ -390,6 +428,186 @@ export class MessengerClient {
     // The promise is awaited by login(); this branch only marks the rejection
     // as handled so constructing a client without logging in stays quiet.
     void this.#pluginsReady.catch(() => undefined);
+
+    this.#dryRun = options.dryRun === true;
+    this.#stealthEnabled = options.stealth?.enabled !== false;
+    this.#updateOptions = options.update;
+
+    this.#stealth = new StealthGuard({
+      config: options.stealth,
+      logger: this.#logger,
+      storage: this.#storage,
+    });
+    this.#stealth.setCallbacks({
+      onSignal: (signal) => {
+        this.#emitter.emitAndForget("suspension_warning", {
+          type: "suspension_warning",
+          timestamp: Date.now(),
+          signal,
+        });
+      },
+      onHalt: (_state, reason) => {
+        this.#emitter.emitAndForget("suspension_halt", {
+          type: "suspension_halt",
+          timestamp: Date.now(),
+          reason,
+          cooldownMs: 24 * 60 * 60 * 1000,
+        });
+      },
+      onReset: () => {
+        this.#emitter.emitAndForget("suspension_reset", {
+          type: "suspension_reset",
+          timestamp: Date.now(),
+        });
+      },
+      onCapWarning: (window, count, limit) => {
+        this.#emitter.emitAndForget("suspension_warning", {
+          type: "suspension_warning",
+          timestamp: Date.now(),
+          signal: {
+            type: "cap_warning",
+            severity: "pause",
+            message: `${window} cap at ${count}/${limit} — pacing doubled`,
+            timestamp: Date.now(),
+            context: { window, count, limit },
+          },
+        });
+      },
+      onCapReached: (window, count, limit) => {
+        this.#emitter.emitAndForget("suspension_warning", {
+          type: "suspension_warning",
+          timestamp: Date.now(),
+          signal: {
+            type: "cap_reached",
+            severity: "halt",
+            message: `${window} cap reached (${count}/${limit}) — outbound sends halted until the window resets`,
+            timestamp: Date.now(),
+            context: { window, count, limit },
+          },
+        });
+      },
+      onCheckpoint: (signal) => {
+        this.#emitter.emitAndForget("checkpoint", {
+          type: "checkpoint",
+          timestamp: Date.now(),
+          operation: typeof signal.context["operation"] === "string" ? (signal.context["operation"] as string) : "unknown",
+          code: signal.code,
+          detail: signal.message,
+        });
+      },
+      onRiskRising: (metric, detail) => {
+        this.#emitter.emitAndForget("risk_rising", {
+          type: "risk_rising",
+          timestamp: Date.now(),
+          metric,
+          detail,
+        });
+      },
+    });
+
+    this.#health = new HealthScoreCalculator({
+      config: undefined,
+      logger: this.#logger,
+      callbacks: {
+        onScoreUpdate: () => undefined,
+        onWarning: (score) => {
+          this.#emitter.emitAndForget("health_warning", {
+            type: "health_warning",
+            timestamp: Date.now(),
+            score,
+          });
+        },
+        onCritical: (score) => {
+          this.#emitter.emitAndForget("health_critical", {
+            type: "health_critical",
+            timestamp: Date.now(),
+            score,
+          });
+        },
+      },
+    });
+
+    this.#idempotency = new IdempotencyManager({
+      config: undefined,
+      logger: this.#logger,
+      storage: this.#storage,
+    });
+
+    this.#chunker = new MessageChunker({
+      config: undefined,
+      logger: this.#logger,
+    });
+
+    this.#tokenRefresh = new TokenRefreshManager({
+      config: undefined,
+      logger: this.#logger,
+      refreshFn: async () => {
+        try {
+          await this.#refreshCookies();
+          return true;
+        } catch (error) {
+          this.#logger.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "background cookie refresh failed",
+          );
+          return false;
+        }
+      },
+    });
+
+    this.#watchdog = new MQTTWatchdog({
+      config: undefined,
+      logger: this.#logger,
+      callbacks: {
+        onStale: (reason) => {
+          this.#logger.warn({ reason }, "MQTT watchdog considers the connection stale");
+          this.#emitter.emitAndForget("warning", {
+            type: "warning",
+            timestamp: Date.now(),
+            message: `realtime connection stale (${reason})`,
+            context: { reason },
+          });
+          // The transport has its own ping-timeout watchdog that forces the
+          // reconnect; this callback surfaces the condition, not a second
+          // competing teardown path.
+        },
+        onPingTimeout: () => {
+          this.#logger.warn("MQTT watchdog: PINGRESP overdue — transport will reconnect");
+          this.#emitter.emitAndForget("warning", {
+            type: "warning",
+            timestamp: Date.now(),
+            message: "realtime connection is not answering keepalive pings",
+            context: {},
+          });
+        },
+      },
+    });
+
+    this.#e2eeConfig = resolveE2EEOptions(options.e2ee, this.#config.storageDirectory);
+    this.#diagnostics.setExternalProvider(() => this.#externalStats());
+
+    // F4 — opt-in crash report. Disabled unless PANINDIGAN_DEBUG=1.
+    if (process.env.PANINDIGAN_DEBUG === "1") {
+      process.once("uncaughtException", (error) => {
+        try {
+          const report = {
+            at: new Date().toISOString(),
+            error: {
+              name: error.name,
+              message: error.message,
+              stack: error.stack,
+            },
+            diagnostics: this.#diagnostics.getSnapshot(),
+          };
+          writeFileSync("debug-report.json", JSON.stringify(report, null, 2));
+          this.#logger.error("PANINDIGAN_DEBUG=1 — wrote debug-report.json");
+        } catch {
+          // best effort
+        } finally {
+          process.exit(1);
+        }
+      });
+    }
   }
 
   /** Registers a middleware hook. */
@@ -425,6 +643,163 @@ export class MessengerClient {
   /** The diagnostics handle. */
   get diagnostics(): DiagnosticsHandle {
     return this.#diagnostics;
+  }
+
+  /** The Stealth Guard — inspect or reset account protection. */
+  get stealth(): StealthGuard {
+    return this.#stealth;
+  }
+
+  /**
+   * The E2EE client — a faithful port of bhhoang/fbapi-unofficial's Signal
+   * Protocol + Noise transport for 1:1 encrypted threads, or `null` when
+   * E2EE is disabled. Connect it explicitly with `connect()` or let `login()`
+   * do it (see the `e2ee` ClientOption).
+   */
+  get e2ee(): E2EEClient | null {
+    return this.#e2eeClient;
+  }
+
+  /** Creates (once) and returns the E2EE client; `null` when E2EE is disabled. */
+  #createE2EEClient(): E2EEClient | null {
+    if (!this.#e2eeConfig.enabled) {
+      return null;
+    }
+    if (this.#e2eeClient) {
+      return this.#e2eeClient;
+    }
+    const http = this.#http;
+    if (http === null) {
+      return null;
+    }
+    const client = new E2EEClient({
+      userId: this.#session.userId,
+      fbDtsg: http.tokens.fbDtsg ?? "",
+      jazoest: http.tokens.jazoest,
+      lsd: null,
+      clientRevision: null,
+      cookies: this.#session.cookies,
+      http,
+      logger: this.#logger,
+      deviceStorePath: this.#e2eeConfig.deviceStorePath,
+      selfListen: this.#e2eeConfig.selfListen,
+      deviceListCacheMs: this.#e2eeConfig.deviceListCacheMs,
+      onEvent: (event) => this.#routeE2EEEvent(event),
+    });
+    this.#e2eeClient = client;
+    return client;
+  }
+
+  /** Await the encrypted channel; throws when missing or unable to connect. */
+  async #requireE2EE(): Promise<E2EEClient> {
+    const client = this.#e2eeClient ?? this.#createE2EEClient();
+    if (client === null) {
+      throw new NotImplementedError(
+        "E2EE is disabled. Pass e2ee: \"auto\" (or { enabled: true }) to MessengerClient to use encrypted one-to-one messaging.",
+        { context: { operation: "sendEncryptedMessage" } },
+      );
+    }
+    await client.connect();
+    return client;
+  }
+
+  /** Opens the encrypted channel at login when enabled. */
+  async #connectE2EE(): Promise<void> {
+    if (!this.#e2eeConfig.enabled) {
+      return;
+    }
+    if (!this.#e2eeConfig.autoConnect && !this.#e2eeConfig.require) {
+      this.#createE2EEClient();
+      return;
+    }
+    const client = this.#createE2EEClient();
+    if (client === null) {
+      return;
+    }
+    try {
+      await client.connect();
+      this.#logger.info({ deviceId: client.deviceId }, "E2EE encrypted channel connected");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (this.#e2eeConfig.require) {
+        throw new Error(`E2EE connection failed and e2ee: "require" was set: ${message}`);
+      }
+      this.#emitter.emitAndForget("warning", {
+        type: "warning",
+        timestamp: Date.now(),
+        message: `E2EE connection failed (continuing without it): ${message}`,
+        context: { operation: "e2ee_connect" },
+      });
+    }
+  }
+
+  /** Maps the E2EE client's events onto this library's event map. */
+  #routeE2EEEvent(event: E2EEIncomingEvent): void {
+    switch (event.type) {
+      case "e2ee_message":
+        this.#emitter.emitAndForget("e2ee_message", {
+          type: "e2ee_message",
+          timestamp: event.timestamp,
+          messageId: event.messageId ?? "",
+          threadId: event.threadId,
+          senderId: event.senderId,
+          isGroup: false,
+          body: event.body,
+          attachments: [],
+          mentions: [],
+          isSelf: event.senderId === this.#session.userId,
+          isE2EE: true,
+          decryptFailed: false,
+        });
+        break;
+      case "e2ee_message_edit":
+        this.#emitter.emitAndForget("e2ee_message_edit", {
+          type: "e2ee_message_edit",
+          timestamp: event.timestamp,
+          threadId: event.threadId,
+          messageId: event.messageId,
+          newBody: event.body,
+          decryptFailed: false,
+          isE2EE: true,
+        });
+        break;
+      case "e2ee_message_reaction":
+        this.#emitter.emitAndForget("e2ee_message_reaction", {
+          type: "e2ee_message_reaction",
+          timestamp: event.timestamp,
+          threadId: event.threadId,
+          messageId: event.messageId,
+          userId: event.senderId,
+          emoji: event.reaction,
+          isSelf: event.senderId === this.#session.userId,
+          isE2EE: true,
+        });
+        break;
+      case "e2ee_message_unsend":
+        this.#emitter.emitAndForget("message_unsend", {
+          type: "message_unsend",
+          timestamp: event.timestamp,
+          messageId: event.messageId,
+          threadId: event.threadId,
+          senderId: event.senderId,
+          isSelf: event.senderId === this.#session.userId,
+        });
+        break;
+    }
+  }
+
+  /**
+   * The update checker. Announce-only until you call `check()`; installing
+   * is an explicit `install()` call — never automatic.
+   */
+  get update(): UpdateChecker {
+    this.#updateChecker ??= new UpdateChecker({
+      options: this.#updateOptions,
+      logger: this.#logger,
+      storage: this.#storage,
+      version: VERSION,
+    });
+    return this.#updateChecker;
   }
 
   // -------------------------------------------------------------------------
@@ -564,6 +939,12 @@ export class MessengerClient {
             context,
           });
         },
+        onPingSent: () => {
+          this.#watchdog.recordPingSent();
+        },
+        onPongReceived: () => {
+          this.#watchdog.recordPongReceived();
+        },
       },
     });
     this.#mqtt = mqtt;
@@ -584,6 +965,16 @@ export class MessengerClient {
     }
 
     await this.#session.persist();
+
+    // Stealth Guard, health, idempotency, E2EE, watchdog, token refresh —
+    // start after the realtime connection is up and the session is ACTIVE.
+    await this.#stealth.initialize();
+    await this.#idempotency.start();
+    await this.#connectE2EE();
+    this.#health.start();
+    this.#watchdog.start();
+    this.#tokenRefresh.start();
+
     this.#session.startCookieRefresh(async () => {
       await this.#refreshCookies();
     });
@@ -593,6 +984,11 @@ export class MessengerClient {
 
   /** Ends the session and closes both transports. */
   async logout(): Promise<void> {
+    const e2ee = this.#e2eeClient;
+    this.#e2eeClient = null;
+    if (e2ee !== null) {
+      void e2ee.disconnect().catch(() => undefined);
+    }
     const userId = this.#session.userId;
     const state = this.#session.state;
 
@@ -630,6 +1026,11 @@ export class MessengerClient {
       }
     }
 
+    this.#tokenRefresh.stop();
+    this.#watchdog.stop();
+    this.#health.stop();
+    this.#idempotency.stop();
+
     if (state !== "UNINITIALIZED" && state !== "CLOSED") {
       this.#session.markClosed();
     }
@@ -659,11 +1060,87 @@ export class MessengerClient {
   // Messaging
   // -------------------------------------------------------------------------
 
-  /** Sends text, a sticker, a GIF, or a previously uploaded attachment. */
+  /**
+   * Auto-route (C4): seal a plaintext text body when a session exists.
+   * 1:1 threads only — in groups each participant has their own device key,
+   * and a single shared session key is not meaningful, so groups always
+   * send plaintext (documented behavior).
+   */
+  /**
+   * Sends text, a sticker, a GIF, or a previously uploaded attachment.
+   *
+   * Long text bodies are split at sentence boundaries into <= 2000-char
+   * chunks with human-like inter-chunk delays (G3). Facebook receives every
+   * chunk as a sequential message — order is preserved by awaiting each
+   * before the next. Mentions disable chunking (offsets would shift).
+   */
   async sendMessage(threadId: string, content: MessageContent): Promise<MessageSendResult> {
     const targetThreadId = parseThreadId(threadId);
     const parsed = parseMessageContent(content);
+    if (parsed.type === "text" && !(parsed.mentions?.length)) {
+      const chunks = this.#chunker.chunk(parsed.body);
+      if (chunks.length > 1) {
+        let first: MessageSendResult | null = null;
+        for (const chunk of chunks) {
+          if (chunk.delayMs > 0) {
+            await sleep(chunk.delayMs);
+          }
+          const sent = await this.#send(targetThreadId, { ...parsed, body: chunk.text });
+          first ??= sent;
+        }
+        // first is set whenever chunks.length > 0, which holds here
+        return first as MessageSendResult;
+      }
+    }
     return this.#send(targetThreadId, parsed);
+  }
+
+  /**
+   * Encrypted one-to-one messaging over Messenger's E2EE transport
+   * (Signal Protocol + Noise XX; port of bhhoang/fbapi-unofficial, MIT).
+   *
+   * Requires `e2ee: "auto" | "require"` (or an object with `enabled: true`).
+   * Group threads are not supported by the transport — callers get
+   * `NotImplementedError`. Attachments are likewise not supported yet.
+   *
+   * The device identity persists at `e2ee.deviceStorePath` (default
+   * `<storageDirectory>/e2ee_device.json`). **Keep the file** — deleting it
+   * re-registers a new E2EE device under your account on the next connect.
+   */
+  async sendEncryptedMessage(threadId: string, text: string): Promise<MessageSendResult> {
+    const targetThreadId = parseThreadId(threadId);
+    const body = parseMessageBody(text);
+    const gate = await this.#gateOutbound("sendEncryptedMessage", targetThreadId, {
+      pace: true,
+      summary: { operation: "sendEncryptedMessage", bytes: body.length },
+    });
+    if (gate.dryRun) {
+      return {
+        messageId: `dryrun_${randomUUID().slice(0, 8)}`,
+        threadId: targetThreadId,
+        offlineThreadingId: `dryrun_${randomUUID().slice(0, 8)}`,
+      };
+    }
+    const isGroup = await this.#isGroupThread(targetThreadId);
+    if (isGroup) {
+      throw new NotImplementedError(
+        "E2EE only supports one-to-one threads; group encrypted chats need sender keys, which this port does not implement.",
+        { context: { operation: "sendEncryptedMessage", threadId: targetThreadId } },
+      );
+    }
+    const client = await this.#requireE2EE();
+    try {
+      const { messageId } = await client.sendTextMessage(targetThreadId, body);
+      this.#completeOutbound("sendEncryptedMessage", targetThreadId, true);
+      return {
+        messageId,
+        threadId: targetThreadId,
+        offlineThreadingId: `e2ee_${randomUUID().slice(0, 8)}`,
+      };
+    } catch (error) {
+      this.#stealth.markComplete("sendEncryptedMessage", targetThreadId);
+      throw error;
+    }
   }
 
   /** Replies to a specific message. */
@@ -693,7 +1170,12 @@ export class MessengerClient {
   async editMessage(messageId: string, newBody: string): Promise<void> {
     const id = parseMessageId(messageId);
     const body = parseMessageBody(newBody);
-    const mqtt = this.#requireMqtt();
+    const gate = await this.#gateOutbound("sendMessage", undefined, { pace: true, summary: { operation: "editMessage", bytes: body.length } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      const mqtt = this.#requireMqtt();
     const result = await mqtt.lsRequest({
       label: EDIT_TASK_LABEL,
       payload: { message_id: id, text: body },
@@ -717,14 +1199,25 @@ export class MessengerClient {
         { retryable: false, context: { messageId: id, expected: body, received: replacement } },
       );
     }
+    } finally {
+      this.#completeOutbound("sendMessage", undefined, false);
+    }
   }
 
   /** Unsends (deletes) a message. */
   async unsendMessage(messageId: string): Promise<void> {
     const id = parseMessageId(messageId);
-    await this.#postForm("unsendMessage", `${FB_BASE_URL}/messaging/unsend_message/`, { message_id: id });
-    this.#messages.delete(id);
-    this.#messageThread.delete(id);
+    const gate = await this.#gateOutbound("sendMessage", undefined, { pace: true, summary: { operation: "unsendMessage" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      await this.#postForm("unsendMessage", `${FB_BASE_URL}/messaging/unsend_message/`, { message_id: id });
+      this.#messages.delete(id);
+      this.#messageThread.delete(id);
+    } finally {
+      this.#completeOutbound("sendMessage", undefined, false);
+    }
   }
 
   /** Forwards every attachment of a cached message to another thread. */
@@ -743,18 +1236,26 @@ export class MessengerClient {
         context: { messageId: id },
       });
     }
+    const gate = await this.#gateOutbound("sendMessage", target, { pace: true, summary: { operation: "forwardMessage", attachmentCount: message.attachments.length } });
+    if (gate.dryRun) {
+      return;
+    }
     const timestamp = Math.floor(Date.now() / 1000);
-    for (const [index, attachment] of message.attachments.entries()) {
-      const form: Record<string, FormValue> = { attachment_id: attachment.id };
-      form[`recipient_map[${timestamp + index}]`] = target;
-      const json = await this.#postForm("forwardMessage", `${FB_BASE_URL}/mercury/attachments/forward/`, form);
-      const payload = asRecord(asRecord(json)?.["payload"]);
-      if (payload !== null && payload["success"] === false) {
-        throw new APIError("Facebook rejected the attachment forward", "API_ERROR", {
-          retryable: false,
-          context: { messageId: id, attachmentId: attachment.id },
-        });
+    try {
+      for (const [index, attachment] of message.attachments.entries()) {
+        const form: Record<string, FormValue> = { attachment_id: attachment.id };
+        form[`recipient_map[${timestamp + index}]`] = target;
+        const json = await this.#postForm("forwardMessage", `${FB_BASE_URL}/mercury/attachments/forward/`, form);
+        const payload = asRecord(asRecord(json)?.["payload"]);
+        if (payload !== null && payload["success"] === false) {
+          throw new APIError("Facebook rejected the attachment forward", "API_ERROR", {
+            retryable: false,
+            context: { messageId: id, attachmentId: attachment.id },
+          });
+        }
       }
+    } finally {
+      this.#completeOutbound("sendMessage", target, true);
     }
   }
 
@@ -968,33 +1469,89 @@ export class MessengerClient {
   }
 
   /** Mutes notifications for a thread. */
-  async muteThread(threadId: string): Promise<void> {
-    await this.#setMute(threadId, "-1");
+  /**
+   * Mutes notifications for a thread.
+   * `duration` is in minutes (1 – 525600, i.e. up to a year) or `"always"`
+   * for `mute_settings: "-1"` (the web client's "forever"). Default: `"always"`.
+   */
+  async muteThread(threadId: string, duration: number | "always" = "always"): Promise<void> {
+    const id = parseThreadId(threadId);
+    const gate = await this.#gateOutbound("global", id, { pace: false, summary: { operation: "muteThread" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      if (duration === "always") {
+        await this.#setMute(id, "-1");
+        return;
+      }
+      if (!Number.isFinite(duration) || !Number.isInteger(duration) || duration < 1 || duration > 525_600) {
+        throw new ValidationError(
+          "muteThread duration must be a whole number of minutes (1–525600) or \"always\"",
+          { context: { duration } },
+        );
+      }
+      await this.#setMute(id, String(duration * 60));
+    } finally {
+      this.#completeOutbound("global", id, true);
+    }
   }
 
   /** Unmutes notifications for a thread. */
   async unmuteThread(threadId: string): Promise<void> {
-    await this.#setMute(threadId, "0");
+    const gate = await this.#gateOutbound("global", threadId, { pace: false, summary: { operation: "unmuteThread" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      await this.#setMute(threadId, "0");
+    } finally {
+      this.#completeOutbound("global", threadId, true);
+    }
   }
 
   /** Archives a thread. */
   async archiveThread(threadId: string): Promise<void> {
-    await this.#setArchived(threadId, true);
+    const gate = await this.#gateOutbound("global", threadId, { pace: false, summary: { operation: "archiveThread" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      await this.#setArchived(threadId, true);
+    } finally {
+      this.#completeOutbound("global", threadId, true);
+    }
   }
 
   /** Unarchives a thread. */
   async unarchiveThread(threadId: string): Promise<void> {
-    await this.#setArchived(threadId, false);
+    const gate = await this.#gateOutbound("global", threadId, { pace: false, summary: { operation: "unarchiveThread" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      await this.#setArchived(threadId, false);
+    } finally {
+      this.#completeOutbound("global", threadId, true);
+    }
   }
 
   /** Deletes a thread. */
   async deleteThread(threadId: string): Promise<void> {
     const id = parseThreadId(threadId);
-    await this.#postForm("deleteThread", `${FB_BASE_URL}/ajax/mercury/delete_thread.php`, {
-      client: "mercury",
-      "ids[0]": id,
-    });
-    this.#threadKinds.delete(id);
+    const gate = await this.#gateOutbound("global", id, { pace: false, summary: { operation: "deleteThread" } });
+    if (gate.dryRun) {
+      return;
+    }
+    try {
+      await this.#postForm("deleteThread", `${FB_BASE_URL}/ajax/mercury/delete_thread.php`, {
+        client: "mercury",
+        "ids[0]": id,
+      });
+      this.#threadKinds.delete(id);
+    } finally {
+      this.#completeOutbound("global", id, true);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1003,42 +1560,52 @@ export class MessengerClient {
 
   /** Creates a group thread with at least two other participants. */
   async createGroup(userIds: readonly string[], name?: string | undefined): Promise<string> {
+    const gate = await this.#gateOutbound("createGroup", undefined, { pace: true, summary: { operation: "createGroup", participantCount: userIds.length } });
+    if (gate.dryRun) {
+      return "dryrun_group";
+    }
     const ids = parseUserIds(userIds);
     const groupName = name === undefined ? null : parseThreadName(name);
     const userId = this.#requireUserId();
     const participants = ids.map((id) => ({ fbid: id }));
     participants.push({ fbid: userId });
 
-    const json = await postGraphQL(this.#requireHttp(), "createGroup", {
-      fb_api_caller_class: "RelayModern",
-      fb_api_req_friendly_name: "MessengerGroupCreateMutation",
-      doc_id: GROUP_CREATE_DOC_ID,
-      variables: JSON.stringify({
-        input: {
-          entry_point: "jewel_new_group",
-          actor_id: userId,
-          participants,
-          client_mutation_id: String(Math.round(Math.random() * 1024)),
-          thread_settings: {
-            name: groupName,
-            joinable_mode: "PRIVATE",
-            thread_image_fbid: null,
+    try {
+      const json = await postGraphQL(this.#requireHttp(), "createGroup", {
+        fb_api_caller_class: "RelayModern",
+        fb_api_req_friendly_name: "MessengerGroupCreateMutation",
+        doc_id: GROUP_CREATE_DOC_ID,
+        variables: JSON.stringify({
+          input: {
+            entry_point: "jewel_new_group",
+            actor_id: userId,
+            participants,
+            client_mutation_id: String(Math.round(Math.random() * 1024)),
+            thread_settings: {
+              name: groupName,
+              joinable_mode: "PRIVATE",
+              thread_image_fbid: null,
+            },
           },
-        },
-      }),
-    });
-
-    const data = asRecord(asRecord(json)?.["data"]);
-    const created = asRecord(asRecord(asRecord(data?.["messenger_group_thread_create"])?.["thread"])?.["thread_key"]);
-    const threadId = readId(created?.["thread_fbid"]);
-    if (threadId === null) {
-      throw new APIError("Facebook did not return the new group thread id", "API_ERROR", {
-        retryable: false,
-        context: { operation: "createGroup" },
+        }),
       });
+
+      const data = asRecord(asRecord(json)?.["data"]);
+      const created = asRecord(asRecord(asRecord(data?.["messenger_group_thread_create"])?.["thread"])?.["thread_key"]);
+      const threadId = readId(created?.["thread_fbid"]);
+      if (threadId === null) {
+        throw new APIError("Facebook did not return the new group thread id", "API_ERROR", {
+          retryable: false,
+          context: { operation: "createGroup" },
+        });
+      }
+      this.#threadKinds.set(threadId, true);
+      this.#completeOutbound("createGroup", undefined, true);
+      return threadId;
+    } catch (error) {
+      this.#stealth.markComplete("createGroup", undefined);
+      throw error;
     }
-    this.#threadKinds.set(threadId, true);
-    return threadId;
   }
 
   /** Adds a participant to a group thread. */
@@ -1053,17 +1620,21 @@ export class MessengerClient {
       extra: { "log_message_data[added_participants][0]": `fbid:${participantId}` },
       threadIdField: "",
     });
-    await this.#postForm("addParticipant", `${FB_BASE_URL}/messaging/send/`, form);
+    await this.#withOutboundGate("createGroup", id, { operation: "addParticipant" }, () =>
+      this.#postForm("addParticipant", `${FB_BASE_URL}/messaging/send/`, form),
+    );
   }
 
   /** Removes a participant from a group thread. */
   async removeParticipant(threadId: string, userId: string): Promise<void> {
     const id = parseThreadId(threadId);
     const participantId = parseUserId(userId);
-    await this.#postForm("removeParticipant", `${FB_BASE_URL}/chat/remove_participants`, {
-      uid: participantId,
-      tid: id,
-    });
+    await this.#withOutboundGate("createGroup", id, { operation: "removeParticipant" }, () =>
+      this.#postForm("removeParticipant", `${FB_BASE_URL}/chat/remove_participants`, {
+        uid: participantId,
+        tid: id,
+      }),
+    );
   }
 
   /** Renames a group thread. */
@@ -1077,72 +1648,125 @@ export class MessengerClient {
       logMessageType: "log:thread-name",
       extra: { thread_name: parsed, thread_id: id },
     });
-    await this.#postForm("changeGroupName", `${FB_BASE_URL}/messaging/set_thread_name/`, form);
+    await this.#withOutboundGate("global", id, { operation: "changeGroupName" }, () =>
+      this.#postForm("changeGroupName", `${FB_BASE_URL}/messaging/set_thread_name/`, form),
+    );
   }
 
   /** Changes a group thread's photo. */
   async changeGroupPhoto(threadId: string, file: FileInput): Promise<void> {
     assertFileInput(file);
     const id = parseThreadId(threadId);
-    const info = await this.#upload(file);
-    const form = buildLogMessageForm({
-      userId: this.#requireUserId(),
-      clientId: this.#clientId,
-      threadId: id,
-      logMessageType: "log:thread-image",
-      extra: { thread_image_id: info.attachmentId, thread_id: id },
+    await this.#withOutboundGate("global", id, { operation: "changeGroupPhoto" }, async () => {
+      const info = await this.#upload(file);
+      const form = buildLogMessageForm({
+        userId: this.#requireUserId(),
+        clientId: this.#clientId,
+        threadId: id,
+        logMessageType: "log:thread-image",
+        extra: { thread_image_id: info.attachmentId, thread_id: id },
+      });
+      await this.#postForm("changeGroupPhoto", `${FB_BASE_URL}/messaging/set_thread_image/`, form);
     });
-    await this.#postForm("changeGroupPhoto", `${FB_BASE_URL}/messaging/set_thread_image/`, form);
   }
 
   /** Changes a group thread's emoji. */
   async changeGroupEmoji(threadId: string, emoji: string): Promise<void> {
     const id = parseThreadId(threadId);
     const value = parseQuery(emoji);
-    await this.#postForm(
-      "changeGroupEmoji",
-      `${FB_BASE_URL}/messaging/save_thread_emoji/?source=thread_settings&__pc=EXP1%3Amessengerdotcom_pkg`,
-      { emoji_choice: value, thread_or_other_fbid: id },
+    await this.#withOutboundGate("global", id, { operation: "changeGroupEmoji" }, () =>
+      this.#postForm(
+        "changeGroupEmoji",
+        `${FB_BASE_URL}/messaging/save_thread_emoji/?source=thread_settings&__pc=EXP1%3Amessengerdotcom_pkg`,
+        { emoji_choice: value, thread_or_other_fbid: id },
+      ),
     );
   }
 
-  /** Changes a group thread's color theme. */
+  /**
+   * Changes a group thread's color theme. Facebook accepts only theme ids
+   * (not hex) — pass a THREAD_COLORS name (case-insensitive) or a raw
+   * numeric theme id. See `getThreadColorList()` for the supported set.
+   */
   async changeGroupTheme(threadId: string, color: string): Promise<void> {
     const id = parseThreadId(threadId);
-    const raw = parseThreadColor(color);
+    const raw = parseThreadColor(color).trim();
     const named =
       THREAD_COLORS[raw as keyof typeof THREAD_COLORS] ??
+      THREAD_COLORS[raw.toLowerCase() as keyof typeof THREAD_COLORS] ??
       Object.entries(THREAD_COLORS).find(([name]) => name.toLowerCase() === raw.toLowerCase())?.[1];
     let themeId: string;
     if (named !== undefined) {
       themeId = named;
+    } else if (/^\d{10,20}$/.test(raw)) {
+      themeId = raw;
     } else {
-      const lowered = raw.toLowerCase();
-      if (!/^[0-9a-f]{6}$/.test(lowered)) {
-        throw new ValidationError("color must be a THREAD_COLORS name or a 6-digit hex value", {
-          context: { color: raw },
-        });
-      }
-      themeId = lowered;
+      throw new ValidationError(
+        "color must be a THREAD_COLORS name (see getThreadColorList()) or a raw numeric theme id",
+        { context: { color: raw } },
+      );
     }
 
-    await this.#batch("changeGroupTheme", {
-      dpr: 1,
-      queries: JSON.stringify({
-        o0: {
-          doc_id: THREAD_COLOR_DOC_ID,
-          query_params: {
-            data: {
-              actor_id: this.#requireUserId(),
-              client_mutation_id: "0",
-              source: "SETTINGS",
-              theme_id: themeId,
-              thread_id: id,
+    await this.#withOutboundGate("global", id, { operation: "changeGroupTheme" }, () =>
+      this.#batch("changeGroupTheme", {
+        dpr: 1,
+        queries: JSON.stringify({
+          o0: {
+            doc_id: THREAD_COLOR_DOC_ID,
+            query_params: {
+              data: {
+                actor_id: this.#requireUserId(),
+                client_mutation_id: "0",
+                source: "SETTINGS",
+                theme_id: themeId,
+                thread_id: id,
+              },
             },
           },
-        },
+        }),
       }),
-    });
+    );
+  }
+
+  /**
+   * Registry of the thread colors Facebook accepts (E1). These are theme
+   * ids, not hex values — the exact set the maintained clients ship.
+   */
+  getThreadColorList(): readonly { readonly name: string; readonly themeId: string }[] {
+    return THREAD_COLOR_REGISTRY;
+  }
+
+  /**
+   * Creates a shareable invite link for a group thread.
+   *
+   * Honest by construction: Facebook does not expose a verifiable invite-link
+   * endpoint for Messenger threads (no maintained client implements it and the
+   * GraphQL surface is undocumented/unstable), so this throws
+   * `NotImplementedError` rather than returning a fake link. If you need one,
+   * create it in the Facebook app — the API equivalent does not exist publicly.
+   */
+  async createInviteLink(_threadId: string): Promise<string> {
+    const id = parseThreadId(_threadId);
+    throw new NotImplementedError(
+      "Facebook exposes no verifiable invite-link endpoint for Messenger threads — create the link in the Facebook app instead (no maintained client implements one either)",
+      { context: { threadId: id } },
+    );
+  }
+
+  /**
+   * Joins a group via a shared invite link. Same reasoning as
+   * `createInviteLink`: no publicly verifiable endpoint exists.
+   */
+  async joinGroupByLink(_link: string): Promise<void> {
+    throw new NotImplementedError(
+      "Facebook exposes no verifiable endpoint to join a Messenger group from an invite link — no maintained client implements one either",
+      { context: {} },
+    );
+  }
+
+  /** Alias of `changeGroupPhoto` — replaces the group's avatar. */
+  async changeGroupAvatar(threadId: string, file: FileInput): Promise<void> {
+    return this.changeGroupPhoto(threadId, file);
   }
 
   /** Promotes or demotes a group admin. */
@@ -1150,11 +1774,13 @@ export class MessengerClient {
     const id = parseThreadId(threadId);
     const participantId = parseUserId(userId);
     const admin = parseBoolean(isAdmin, "isAdmin");
-    await this.#postForm("changeAdminStatus", `${FB_BASE_URL}/messaging/save_admins/?dpr=1`, {
-      thread_fbid: id,
-      "admin_ids[0]": participantId,
-      add: admin,
-    });
+    await this.#withOutboundGate("global", id, { operation: "changeAdminStatus" }, () =>
+      this.#postForm("changeAdminStatus", `${FB_BASE_URL}/messaging/save_admins/?dpr=1`, {
+        thread_fbid: id,
+        "admin_ids[0]": participantId,
+        add: admin,
+      }),
+    );
   }
 
   /** Sets or clears a participant's nickname. */
@@ -1166,10 +1792,12 @@ export class MessengerClient {
         context: { nicknameLength: typeof nickname === "string" ? nickname.length : 0 },
       });
     }
-    await this.#postForm(
-      "changeNickname",
-      `${FB_BASE_URL}/messaging/save_thread_nickname/?source=thread_settings&dpr=1`,
-      { nickname, participant_id: participantId, thread_or_other_fbid: id },
+    await this.#withOutboundGate("global", id, { operation: "changeNickname" }, () =>
+      this.#postForm(
+        "changeNickname",
+        `${FB_BASE_URL}/messaging/save_thread_nickname/?source=thread_settings&dpr=1`,
+        { nickname, participant_id: participantId, thread_or_other_fbid: id },
+      ),
     );
   }
 
@@ -1362,11 +1990,17 @@ export class MessengerClient {
       form[`option_text_array[${index}]`] = option;
       form[`option_is_selected_array[${index}]`] = "0";
     });
-    const json = await this.#postForm(
-      "createPoll",
-      `${FB_BASE_URL}/messaging/group_polling/create_poll/?dpr=1`,
-      form,
+    const json = await this.#withOutboundGate("sendMessage", id, { operation: "createPoll" }, () =>
+      this.#postForm(
+        "createPoll",
+        `${FB_BASE_URL}/messaging/group_polling/create_poll/?dpr=1`,
+        form,
+      ),
     );
+    if (json === undefined) {
+      // Dry-run mode — nothing was sent.
+      return;
+    }
     const status = readString(asRecord(asRecord(json)?.["payload"]), "status");
     if (status !== "success") {
       throw new APIError("Facebook did not create the poll", "API_ERROR", {
@@ -1384,11 +2018,16 @@ export class MessengerClient {
     ids.forEach((optionId, index) => {
       form[`selected_options[${index}]`] = optionId;
     });
-    const json = await this.#postForm(
-      "votePoll",
-      `${FB_BASE_URL}/messaging/group_polling/update_vote/?dpr=1`,
-      form,
+    const json = await this.#withOutboundGate("global", undefined, { operation: "votePoll" }, () =>
+      this.#postForm(
+        "votePoll",
+        `${FB_BASE_URL}/messaging/group_polling/update_vote/?dpr=1`,
+        form,
+      ),
     );
+    if (json === undefined) {
+      return;
+    }
     const status = readString(asRecord(asRecord(json)?.["payload"]), "status");
     if (status !== "success") {
       throw new APIError("Facebook did not record the poll vote", "API_ERROR", {
@@ -1523,21 +2162,280 @@ export class MessengerClient {
     return this.#userId;
   }
 
-  async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
-    const response = await http.get("login", `${FB_BASE_URL}/home.php`, {
-      headers: { accept: HTML_ACCEPT_HEADER },
-    });
-    const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+  // ------------------------------------------------------------------
+  // Stealth Guard helpers
+  // ------------------------------------------------------------------
 
-    // Unauthenticated home.php responses come back as a tiny JSON error
-    // envelope, not a page — surface the actual Facebook error verbatim.
-    const apiError = extractFacebookApiError(response.body);
+  /**
+   * Gate an outbound operation through the Stealth Guard.
+   * - dry-run mode: logs the payload summary and short-circuits without
+   *   touching the network;
+   * - otherwise: rate limit + circuit breaker + cap checks, then pacing
+   *   jitter (unless `pace: false`).
+   * Throws `AccountRestrictedError` when halted.
+   */
+  async #gateOutbound(
+    operation: string,
+    target: string | undefined,
+    opts: { pace?: boolean | undefined; summary?: Record<string, unknown> | undefined } = {},
+  ): Promise<{ dryRun: boolean }> {
+    if (this.#dryRun) {
+      this.#logger.info(
+        { operation, target, ...(opts.summary ?? {}) },
+        "DRY RUN — payload would be sent; nothing hit the network",
+      );
+      return { dryRun: true };
+    }
+    const decision = this.#stealth.checkOperation(operation, target);
+    if (!decision.allowed) {
+      throw new AccountRestrictedError(
+        decision.reason ?? "outbound operation blocked by account protection",
+        { context: { operation, target } },
+      );
+    }
+    if (opts.pace !== false) {
+      const delay = this.#stealth.getPacingDelay();
+      if (delay > 0) {
+        await sleep(delay);
+      }
+    }
+    return { dryRun: false };
+  }
+
+  /** Release the guard's in-flight slot and count a completed send against the caps. */
+  #completeOutbound(operation: string, target: string | undefined, countCaps: boolean): void {
+    this.#stealth.markComplete(operation, target);
+    if (countCaps) {
+      this.#stealth.recordOutbound(operation, target);
+    }
+  }
+
+  /**
+   * Runs an outbound operation inside the guard. Returns `undefined` in
+   * dry-run mode (nothing touched the network); otherwise returns fn()'s
+   * result and releases the guard's accounting on the way out.
+   */
+  async #withOutboundGate<T>(
+    operation: string,
+    target: string | undefined,
+    summary: Record<string, unknown>,
+    fn: () => Promise<T>,
+    opts?: { pace?: boolean | undefined },
+  ): Promise<T | undefined> {
+    const gate = await this.#gateOutbound(operation, target, { ...opts, summary });
+    if (gate.dryRun) {
+      return undefined;
+    }
+    try {
+      const result = await fn();
+      this.#completeOutbound(operation, target, true);
+      return result;
+    } catch (error) {
+      this.#stealth.markComplete(operation, target);
+      throw error;
+    }
+  }
+
+  /** Bump the thread heat counter (G4). Bounded map; counts and recency only. */
+  #bumpThreadHeat(threadId: string): void {
+    const existing = this.#threadHeat.get(threadId);
+    if (existing !== undefined) {
+      existing.count += 1;
+      existing.lastMs = Date.now();
+      return;
+    }
+    // Bound the map so a long-running bot does not grow it forever.
+    if (this.#threadHeat.size >= 500) {
+      const oldest = this.#threadHeat.keys().next().value;
+      if (oldest !== undefined) {
+        this.#threadHeat.delete(oldest);
+      }
+    }
+    this.#threadHeat.set(threadId, { count: 1, lastMs: Date.now() });
+  }
+
+  /** Local, own-traffic-only heat ranking for diagnostics (G4). */
+  #threadHeatSnapshot(): { tracked: number; hottest: { threadId: string; score: number }[] } {
+    const now = Date.now();
+    const hottest = [...this.#threadHeat.entries()]
+      .map(([threadId, entry]) => ({
+        threadId,
+        // Decay with a 12-hour half-life; count capped so one spammy room can't dominate.
+        score:
+          Math.round(
+            Math.min(entry.count, 50) *
+              Math.exp(-(now - entry.lastMs) / (12 * 60 * 60 * 1000)) *
+              10,
+          ) / 10,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+    return { tracked: this.#threadHeat.size, hottest };
+  }
+
+  /**
+   * Feeds the detector from a caught error and records a suspension signal
+   * when one matches. Checkpoint-class signals force the guard open
+   * immediately (A9 checkpoint realtime guard).
+   */
+  #recordSignalFromError(error: unknown, operation?: string): void {
+    if (!(error instanceof LibraryError)) {
+      return;
+    }
+    const context = (error.context ?? {}) as Record<string, unknown>;
+    const rawCode = context["code"];
+    const numeric = typeof rawCode === "number" ? rawCode : undefined;
+    let signal: SuspensionSignal | null = null;
+    if (numeric !== undefined) {
+      signal = detector.detectFromAPIError({
+        code: numeric,
+        message: error.message,
+        errorSummary: typeof context["summary"] === "string" ? (context["summary"] as string) : undefined,
+        errorDescription: typeof context["description"] === "string" ? (context["description"] as string) : undefined,
+      });
+    }
+    if (signal === null) {
+      const text = typeof context["message"] === "string" ? (context["message"] as string) : error.message;
+      signal = detector.detectFromText(text, operation ?? "http");
+    }
+    if (signal === null) {
+      return;
+    }
+    const isCheckpoint =
+      signal.severity === "critical" && /checkpoint|verification|identity|approval/i.test(signal.message);
+    if (isCheckpoint) {
+      void this.#stealth.forceHalt(`checkpoint signal from ${operation ?? "http"}`);
+    }
+    void this.#stealth.recordSignal({
+      ...signal,
+      context: { ...signal.context, operation: operation ?? "unknown" },
+    });
+  }
+
+  /** Data for `diagnostics` — everything the guard knows, safe to serialize. */
+  #externalStats(): { stealth: StealthDiagnostics } {
+    const state = this.#stealth.getState();
+    const audit = this.#stealth.getAudit().snapshot();
+    return {
+      stealth: {
+        enabled: this.#stealthEnabled,
+        circuitState: state.circuitState,
+        warmupDay: state.warmupDay,
+        warmupMultiplier: this.#stealth.getWarmupMultiplier(),
+        signalsInWindow: state.signals.length,
+        haltedAt: state.haltedAt,
+        caps: this.#stealth.capsSnapshot(),
+        healthScore: this.#health.getScore(),
+        threads: this.#threadHeatSnapshot(),
+        audit: {
+          total: audit.total,
+          recent: audit.entries.slice(-20).map((entry) => ({
+            at: entry.at,
+            decision: entry.decision,
+            reason: entry.reason,
+            ...(entry.operation !== undefined ? { operation: entry.operation } : {}),
+            ...(entry.target !== undefined ? { target: entry.target } : {}),
+          })),
+        },
+      },
+    };
+  }
+
+  /**
+   * Low-level text envelope send used by the E2EE handshake. Bypasses the
+   * E2EE auto-route (handshakes must stay plaintext) but still respects
+   * the Stealth Guard — a frozen account does not get exceptions.
+   */
+  async #sendRawEnvelope(threadId: string, body: string): Promise<string> {
+    const gate = await this.#gateOutbound("sendMessage", threadId, {
+      pace: false,
+      summary: { envelope: "e2ee-handshake", bytes: body.length },
+    });
+    if (gate.dryRun) {
+      return "dryrun_e2ee_hello";
+    }
+    const isGroup = await this.#isGroupThread(threadId);
+    const offlineThreadingId = generateOfflineThreadingId();
+    const form = buildMessageForm({
+      userId: this.#requireUserId(),
+      clientId: this.#clientId,
+      threadId,
+      isGroup,
+      offlineThreadingId,
+    });
+    form["body"] = body;
+    form["has_attachment"] = false;
+    try {
+      const json = await this.#postForm("sendMessage", `${FB_BASE_URL}/messaging/send/`, form);
+      const payload = asRecord(asRecord(json)?.["payload"]) ?? asRecord(json);
+      const actions = asArray(payload?.["actions"]);
+      const first = asRecord(actions[0]);
+      const messageId = readId(first?.["message_id"]);
+      if (messageId === null) {
+        throw new APIError("Facebook did not return a message id for the handshake send", "API_ERROR", {
+          retryable: false,
+          context: { operation: "sendMessage", threadId },
+        });
+      }
+      return messageId;
+    } finally {
+      this.#completeOutbound("sendMessage", threadId, true);
+    }
+  }
+
+  /** Deterministic, non-secret idempotency key for a send. */
+  #idempotencyKey(operation: string, target: string | undefined, payload: unknown): string {
+    return createHash("sha256")
+      .update(operation)
+      .update(":")
+      .update(target ?? "")
+      .update(":")
+      .update(JSON.stringify(payload))
+      .digest("base64url")
+      .slice(0, 43);
+  }
+
+  async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
+    const attemptHome = () =>
+      http.get("login", `${FB_BASE_URL}/home.php`, {
+        headers: { accept: HTML_ACCEPT_HEADER },
+      });
+
+    let response = await attemptHome();
+
+    let diag = safeHomeDiagnostics(response.body, response.url, response.status);
+
+    // Facebook answers stale-but-valid sessions with error 1357004 ("please
+    // refresh"). Recovery mirrors the web clients: refresh fb_dtsg/jazoest
+    // from the mobile surface, then retry home.php once. Best-effort — if
+    // Facebook rejects that too, the cookies are revoked beyond recovery.
+    let apiError = extractFacebookApiError(response.body);
+    if (apiError?.code === "AUTH_REFRESH_REQUIRED") {
+      const refreshed = await this.#refreshSessionTokens(http);
+      if (refreshed) {
+        response = await attemptHome();
+        diag = safeHomeDiagnostics(response.body, response.url, response.status);
+        apiError = extractFacebookApiError(response.body);
+      }
+    }
+
     if (apiError !== null) {
       const summary = summarizeHomeDiagnostics(diag);
       this.#logger.warn(
         { operation: "login", code: apiError.code, status: diag.status, bytes: diag.contentLength },
         "Facebook returned a structured error for the home page",
       );
+      if (apiError.code === "AUTH_REFRESH_REQUIRED") {
+        void this.#handleSessionExpired("expired");
+        throw new AuthenticationError(
+          `Facebook rejected the session — session is too stale to reuse (error 1357004); re-export your cookies from a browser that is actually logged in (${summary})`,
+          "AUTH_REFRESH_REQUIRED",
+          {
+            retryable: false,
+            context: { operation: "login", facebookCode: 1357004, ...diag },
+          },
+        );
+      }
       throw new AuthenticationError(
         `Facebook rejected the session — ${apiError.message} (${summary})`,
         apiError.code,
@@ -1632,6 +2530,54 @@ export class MessengerClient {
     }
   }
 
+  /**
+   * Rotates a stale-but-valid session: scrapes fresh `fb_dtsg`/`jazoest`
+   * from the mobile surface (`m.facebook.com/`), which serves these as
+   * server-rendered hidden inputs when the account is authenticated.
+   * This mirrors the web clients' recovery for error 1357004 ("please
+   * refresh") — the same technique fca-unofficial uses in refreshFb_dtsg.
+   *
+   * Best-effort by design: if Facebook refuses to serve tokens even with
+   * the cookies, the session is revoked beyond recovery and this returns
+   * false. Never logs or persists token values.
+   */
+  async #refreshSessionTokens(http: HttpTransport): Promise<boolean> {
+    let response;
+    try {
+      // withDefaults:false — the mobile surface must not receive the very
+      // stale fb_dtsg/jazoest pair being refreshed; plain cookies are enough.
+      response = await http.get("refreshSessionTokens", "https://m.facebook.com/", {
+        withDefaults: false,
+        headers: { accept: HTML_ACCEPT_HEADER },
+      });
+    } catch (error) {
+      this.#logger.warn(
+        { operation: "refreshSessionTokens", err: errorMessage(error) },
+        "mobile surface request failed during token refresh",
+      );
+      return false;
+    }
+    const tokens = extractMobileTokens(response.body);
+    if (tokens === null) {
+      this.#logger.warn(
+        { operation: "refreshSessionTokens", status: response.status },
+        "mobile surface yielded no fb_dtsg/jazoest to refresh the session",
+      );
+      return false;
+    }
+    const current = http.tokens;
+    http.setTokens({
+      userId: this.#requireUserId(),
+      fbDtsg: tokens.fbDtsg,
+      jazoest: tokens.jazoest,
+      lsd: current.lsd,
+      revision: current.revision,
+      region: current.region,
+    });
+    this.#debug("login", "refreshed fb_dtsg/jazoest from the mobile surface", {});
+    return true;
+  }
+
   async #validateSession(http: HttpTransport): Promise<void> {
     const userId = this.#requireUserId();
     const json = await this.#postForm("validateLogin", `${FB_BASE_URL}/chat/user_info/`, { "ids[0]": userId });
@@ -1665,30 +2611,47 @@ export class MessengerClient {
 
   async #refreshCookies(): Promise<void> {
     const http = this.#requireHttp();
-    const response = await http.get("cookieRefresh", `${FB_BASE_URL}/home.php`, {
-      headers: { accept: HTML_ACCEPT_HEADER },
-    });
-    const diag = safeHomeDiagnostics(response.body, response.url, response.status);
+    const attemptHome = () =>
+      http.get("cookieRefresh", `${FB_BASE_URL}/home.php`, {
+        headers: { accept: HTML_ACCEPT_HEADER },
+      });
 
-    const apiError = extractFacebookApiError(response.body);
+    let response = await attemptHome();
+    let diag = safeHomeDiagnostics(response.body, response.url, response.status);
+    let apiError = extractFacebookApiError(response.body);
+
+    // Same best-effort recovery as login: rotate fb_dtsg/jazoest from the
+    // mobile surface, retry once on 1357004.
+    if (apiError?.code === "AUTH_REFRESH_REQUIRED") {
+      const refreshed = await this.#refreshSessionTokens(http);
+      if (refreshed) {
+        response = await attemptHome();
+        diag = safeHomeDiagnostics(response.body, response.url, response.status);
+        apiError = extractFacebookApiError(response.body);
+      }
+    }
+
     if (apiError !== null) {
-      this.#handleSessionExpired("expired");
+      void this.#handleSessionExpired("expired");
+      const summary = summarizeHomeDiagnostics(diag);
       throw new AuthenticationError(
-        `Facebook rejected the session during cookie refresh — ${apiError.message} (${summarizeHomeDiagnostics(diag)})`,
+        apiError.code === "AUTH_REFRESH_REQUIRED"
+          ? `Facebook rejected the session during cookie refresh — session is too stale to reuse (error 1357004); re-export your cookies from a browser that is actually logged in (${summary})`
+          : `Facebook rejected the session during cookie refresh — ${apiError.message} (${summary})`,
         apiError.code,
         {
-          retryable: apiError.retryable,
+          retryable: false,
           context: { operation: "cookieRefresh", ...diag },
         },
       );
     }
 
     if (diag.mqttWebConfigEmpty) {
-      this.#handleSessionExpired("expired");
+      void this.#handleSessionExpired("expired");
       throw new AuthenticationError(
         `Facebook rejected the session during cookie refresh — home.php returned the logged-out page (${summarizeHomeDiagnostics(diag)})`,
         "AUTH_SESSION_EXPIRED",
-        { retryable: true, context: { operation: "cookieRefresh", ...diag } },
+        { retryable: false, context: { operation: "cookieRefresh", ...diag } },
       );
     }
 
@@ -1699,11 +2662,11 @@ export class MessengerClient {
       diag.hasLoginForm ||
       diag.hasCheckpoint;
     if (isExpiredPage) {
-      this.#handleSessionExpired("expired");
+      void this.#handleSessionExpired("expired");
       throw new AuthenticationError(
         `Facebook redirected the session during cookie refresh (${summarizeHomeDiagnostics(diag)})`,
         "AUTH_SESSION_EXPIRED",
-        { retryable: true, context: { operation: "cookieRefresh", ...diag } },
+        { retryable: false, context: { operation: "cookieRefresh", ...diag } },
       );
     }
     const tokens = scrapeTokens(response.body, this.#requireUserId());
@@ -1731,23 +2694,53 @@ export class MessengerClient {
       const response = await http.postForm(operation, url, form);
       return http.check(operation, response);
     } catch (error) {
+      this.#recordSignalFromError(error, operation);
       if (error instanceof AuthenticationError) {
         if (error.code === "AUTH_SESSION_EXPIRED") {
-          this.#handleSessionExpired("expired");
+          void this.#handleSessionExpired("expired");
         } else if (error.code === "AUTH_LOGIN_REJECTED") {
-          this.#handleSessionExpired("invalid");
+          void this.#handleSessionExpired("invalid");
         }
       }
       throw error;
     }
   }
 
-  /** Best-effort teardown and logout event when Facebook rejects the session. */
-  #handleSessionExpired(reason: "expired" | "invalid"): void {
+  /**
+   * A9/A12 — when Facebook rejects the session, attempt one full cookie
+   * re-validation before tearing anything down (A12). If that fails, freeze
+   * proactive sends permanently for this process (A2), emit `session_dead`,
+   * and only then tear down.
+   */
+  async #handleSessionExpired(reason: "expired" | "invalid"): Promise<void> {
     const state = this.#session.state;
     if (state !== "ACTIVE" && state !== "RECONNECTING") {
       return;
     }
+    // Re-entrant call from the re-validation itself (cookie refresh failing
+    // inside forceRefresh routes back here) — return immediately so the
+    // single attempt stays single.
+    if (this.#expiryHandling) {
+      return;
+    }
+    this.#expiryHandling = true;
+    try {
+      const revived = await this.#tokenRefresh.forceRefresh();
+      if (revived) {
+        this.#logger.info("session re-validated via cookie refresh — staying connected");
+        this.#health.recordRequest();
+        this.#expiryHandling = false;
+        return;
+      }
+    } catch (error) {
+      this.#logger.debug({ err: errorMessage(error) }, "session re-validation failed — tearing down");
+    }
+    void this.#stealth.forceHalt("session rejected by Facebook");
+    this.#emitter.emitAndForget("session_dead", {
+      type: "session_dead",
+      timestamp: Date.now(),
+      reason: "session rejected by Facebook — re-export cookies from a logged-in browser",
+    });
     this.#session.markClosing();
     this.#session.markClosed();
 
@@ -1763,6 +2756,11 @@ export class MessengerClient {
     if (http !== null) {
       void http.close().catch(() => undefined);
     }
+
+    this.#tokenRefresh.stop();
+    this.#watchdog.stop();
+    this.#health.stop();
+    this.#idempotency.stop();
 
     this.#clearSessionCaches();
     this.#userId = "";
@@ -1798,17 +2796,25 @@ export class MessengerClient {
   }
 
   async #mutateReaction(messageId: string, action: "ADD_REACTION" | "REMOVE_REACTION", reaction: string): Promise<void> {
+    const gate = await this.#gateOutbound("addReaction", undefined, { pace: true, summary: { action, operation: "reaction" } });
+    if (gate.dryRun) {
+      return;
+    }
     const userId = this.#requireUserId();
     this.#clientMutationId += 1;
-    await postWebGraphQLMutation(this.#requireHttp(), "setReaction", DOC_IDS.reaction, {
-      data: {
-        client_mutation_id: String(this.#clientMutationId),
-        actor_id: userId,
-        action,
-        message_id: messageId,
-        reaction,
-      },
-    });
+    try {
+      await postWebGraphQLMutation(this.#requireHttp(), "setReaction", DOC_IDS.reaction, {
+        data: {
+          client_mutation_id: String(this.#clientMutationId),
+          actor_id: userId,
+          action,
+          message_id: messageId,
+          reaction,
+        },
+      });
+    } finally {
+      this.#completeOutbound("addReaction", undefined, true);
+    }
   }
 
   async #isGroupThread(threadId: string): Promise<boolean> {
@@ -1838,8 +2844,35 @@ export class MessengerClient {
     content: MessageContent,
     replyToMessageId?: string | undefined,
   ): Promise<MessageSendResult> {
-    const isGroup = await this.#isGroupThread(threadId);
-    const offlineThreadingId = generateOfflineThreadingId();
+    const gate = await this.#gateOutbound("sendMessage", threadId, {
+      pace: true,
+      summary: {
+        type: content.type,
+        bytes: content.type === "text" ? content.body.length : 0,
+        replyTo: replyToMessageId ?? null,
+      },
+    });
+    if (gate.dryRun) {
+      return {
+        messageId: `dryrun_${randomUUID().slice(0, 8)}`,
+        threadId,
+        offlineThreadingId: `dryrun_${randomUUID().slice(0, 8)}`,
+      };
+    }
+
+    // G5 — idempotent send: the same content within the TTL returns the cached message id.
+    const idemKey = this.#idempotencyKey("sendMessage", threadId, { content, replyToMessageId });
+    const cached = await this.#idempotency.checkKey(idemKey);
+    if (cached.exists && cached.status === "sent" && cached.messageId !== undefined) {
+      this.#logger.info({ threadId }, "idempotent retry — returning the cached message id");
+      this.#stealth.markComplete("sendMessage", threadId);
+      return { messageId: cached.messageId, threadId, offlineThreadingId: "idempotent" };
+    }
+    await this.#idempotency.recordAttempt(idemKey);
+
+    try {
+      const isGroup = await this.#isGroupThread(threadId);
+      const offlineThreadingId = generateOfflineThreadingId();
     const form = buildMessageForm({
       userId: this.#requireUserId(),
       clientId: this.#clientId,
@@ -1900,7 +2933,16 @@ export class MessengerClient {
       messageId,
       threadId: responseThreadId,
     });
+    this.#health.recordRequest();
+    await this.#idempotency.markSuccess(idemKey, messageId);
+    this.#completeOutbound("sendMessage", threadId, true);
     return { messageId, threadId: responseThreadId, offlineThreadingId };
+    } catch (error) {
+      this.#health.recordError();
+      await this.#idempotency.markFailure(idemKey).catch(() => undefined);
+      this.#stealth.markComplete("sendMessage", threadId);
+      throw error;
+    }
   }
 
   async #upload(file: FileInput): Promise<MediaInfo> {
@@ -1965,6 +3007,10 @@ export class MessengerClient {
     if (delta === null) {
       return;
     }
+    this.#watchdog.recordMessage();
+    if (topic === "/t_ms") {
+      this.#watchdog.recordSyncMessage();
+    }
     this.#debug("mqtt", "payload received", { topic, payload });
     void delta.handleMessage(topic, payload).catch((error) => {
       this.#logger.warn({ topic, err: errorMessage(error) }, "delta processing failed");
@@ -1974,6 +3020,10 @@ export class MessengerClient {
   #createSink(): DeltaSink {
     return {
       raw: (topic, payload) => {
+        const signal = detector.detectFromMQTTPayload(topic, payload);
+        if (signal !== null) {
+          void this.#stealth.recordSignal(signal);
+        }
         this.#emitter.emitAndForget("raw", {
           type: "raw",
           timestamp: Date.now(),
@@ -1990,10 +3040,12 @@ export class MessengerClient {
         });
       },
       message: (event) => {
+        this.#bumpThreadHeat(event.threadId);
         this.#cacheEventMessage(event);
         this.#emitter.emitAndForget("message", event);
       },
       message_reply: (event) => {
+        this.#bumpThreadHeat(event.threadId);
         this.#cacheEventMessage(event);
         this.#emitter.emitAndForget("message_reply", event);
       },
@@ -2190,9 +3242,74 @@ export class MessengerClient {
     this.#pollQuestions.clear();
     this.#presence.clear();
     this.#mediaCache.clear();
+    this.#threadHeat.clear();
   }
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Resolved E2EE behaviour for this session. */
+interface ResolvedE2EEOptions {
+  readonly enabled: boolean;
+  /** Fail login when the encrypted channel cannot be established. */
+  readonly require: boolean;
+  /** Connect automatically at login (default true when enabled). */
+  readonly autoConnect: boolean;
+  readonly selfListen: boolean;
+  readonly deviceStorePath: string;
+  readonly deviceListCacheMs: number;
+}
+
+/**
+ * Maps the high-level `ClientOptions.e2ee` input (string shorthand or partial
+ * config object) onto the resolved options for the session.
+ */
+function resolveE2EEOptions(
+  input: ClientOptions["e2ee"],
+  storageDirectory: string,
+): ResolvedE2EEOptions {
+  const deviceStorePath = `${storageDirectory.replace(/[\\/]+$/, "")}/e2ee_device.json`;
+  const base: ResolvedE2EEOptions = {
+    enabled: false,
+    require: false,
+    autoConnect: true,
+    selfListen: false,
+    deviceStorePath,
+    deviceListCacheMs: 0,
+  };
+  if (input === undefined || input === "off") {
+    return base;
+  }
+  if (typeof input === "string") {
+    if (input === "require") {
+      return { ...base, enabled: true, require: true };
+    }
+    // "auto"
+    return { ...base, enabled: true };
+  }
+  return {
+    enabled: input.enabled ?? true,
+    require: input.require ?? false,
+    autoConnect: input.autoConnect ?? true,
+    selfListen: input.selfListen ?? false,
+    deviceListCacheMs: input.deviceListCacheMs ?? 0,
+    deviceStorePath: input.deviceStorePath ?? deviceStorePath,
+  };
+}
+
+/** Reads a FileInput into a Buffer plus a best-effort filename. */
+async function readFileInput(file: FileInput, fallbackName: string): Promise<{ data: Buffer; fileName: string }> {
+  if (Buffer.isBuffer(file)) {
+    return { data: file, fileName: fallbackName };
+  }
+  if (typeof file === "string") {
+    return { data: readFileSync(file), fileName: basename(file) };
+  }
+  const chunks: Buffer[] = [];
+  for await (const chunk of file) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array));
+  }
+  return { data: Buffer.concat(chunks), fileName: fallbackName };
 }

@@ -32,17 +32,30 @@ login({ appState: JSON.parse(fs.readFileSync("appstate.json")) }, (err, api) => 
 
 ### Panindigan Automate
 ```ts
-import { MessengerClient } from "panindigan-automate";
+import { login } from "panindigan-automate";
 
-const client = new MessengerClient();
+const client = await login("./appstate.json");
 
 client.on("message", async (event) => {
   // Strongly typed message event
 });
+```
 
-// Awaitable login directly accepts the file path
+`login()` is the main entry — it returns the connected client directly. The legacy callback shape is also accepted (`login(creds, (err, client) => …)`), so a minimal fca-style entry point works while the rest of your migration proceeds. The modern constructor remains available for the `ready` event and explicit construction:
+
+```ts
+import { MessengerClient } from "panindigan-automate";
+
+const client = new MessengerClient();
+client.on("ready", (event) => console.log("connected", event.userId));
 await client.login("./appstate.json");
 ```
+
+---
+
+## Migrating — no adapters, no legacy surface
+
+Panindigan Automate ships **one** API: the modern, typed `MessengerClient`. There is no legacy compatibility mode. Every call site in an fca-era bot must be ported to the modern method and event names — the table below is the complete mapping used by the bundled migration targets. There is no way to "just drop the library in" unchanged; the port is mechanical but not invisible.
 
 ---
 

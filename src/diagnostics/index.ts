@@ -197,6 +197,14 @@ export class DiagnosticsCollector implements DiagnosticsHandle {
     }
   }
 
+  /** Additional, feature-specific sections merged into the snapshot. */
+  #externalProvider: (() => Record<string, unknown>) | null = null;
+
+  /** Registers an external stats provider (used by the Stealth Guard wiring). */
+  setExternalProvider(provider: (() => Record<string, unknown>) | null): void {
+    this.#externalProvider = provider;
+  }
+
   getSnapshot(): DiagnosticsSnapshot {
     const memory = process.memoryUsage();
     const now = Date.now();
@@ -258,7 +266,55 @@ export class DiagnosticsCollector implements DiagnosticsHandle {
         heapUsed: memory.heapUsed,
         heapTotal: memory.heapTotal,
       },
+      ...(this.#externalProvider !== null ? (this.#externalProvider() as Partial<DiagnosticsSnapshot>) : {}),
     });
+  }
+
+  /** Renders the snapshot as self-contained JSON. */
+  exportJSON(): string {
+    return JSON.stringify(this.getSnapshot(), null, 2);
+  }
+
+  /**
+   * Renders a self-contained HTML diagnostics report: inline CSS, inline
+   * data, zero external requests. Suitable for attaching to incident tickets.
+   */
+  exportHTML(): string {
+    const snapshot = this.getSnapshot();
+    const esc = (value: unknown): string =>
+      String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    const row = (label: string, value: unknown): string =>
+      `<tr><th>${esc(label)}</th><td>${esc(typeof value === "object" && value !== null ? JSON.stringify(value) : value)}</td></tr>`;
+    const section = (title: string, obj: Record<string, unknown>): string =>
+      `<section><h2>${esc(title)}</h2><table>${Object.entries(obj).map(([k, v]) => row(k, v)).join("")}</table></section>`;
+    return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>panindigan-automate diagnostics</title>
+<style>
+:root{color-scheme:dark}
+body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0b1020;color:#dbe4ff;margin:0;padding:32px;line-height:1.5}
+h1{font-size:1.4rem;margin:0 0 4px}
+.sub{color:#8a97c7;font-size:.85rem;margin-bottom:24px}
+h2{font-size:1rem;color:#7dd3fc;border-bottom:1px solid #1e2a52;padding-bottom:6px;margin:28px 0 8px}
+table{border-collapse:collapse;width:100%;font-size:.85rem}
+th,td{text-align:left;padding:4px 12px;border-bottom:1px solid #141c3a;vertical-align:top}
+th{color:#a5b4fc;width:34%;font-weight:600}
+td{word-break:break-word;white-space:pre-wrap}
+</style></head>
+<body>
+<h1>panindigan-automate — diagnostics report</h1>
+<div class="sub">captured ${esc(new Date(snapshot.capturedAt).toISOString())} · uptime ${Math.round(snapshot.uptimeMs / 1000)}s · node ${esc(snapshot.process.nodeVersion)} · ${esc(snapshot.process.platform)}</div>
+${section("HTTP", snapshot.http as unknown as Record<string, unknown>)}
+${section("MQTT", snapshot.mqtt as unknown as Record<string, unknown>)}
+${section("Cache", snapshot.cache as unknown as Record<string, unknown>)}
+${section("Events", snapshot.events as unknown as Record<string, unknown>)}
+${section("Process", snapshot.process as unknown as Record<string, unknown>)}
+${snapshot.stealth !== undefined ? section("Stealth Guard", snapshot.stealth as unknown as Record<string, unknown>) : ""}
+</body></html>`;
   }
 
   reset(): void {

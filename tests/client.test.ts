@@ -6,6 +6,7 @@ import {
   normalizeColor,
   normalizeLegacyThread,
   normalizeMessageNode,
+  normalizePoll,
   normalizePollOptions,
   normalizeSearchUser,
   normalizeThread,
@@ -304,6 +305,14 @@ describe("poll normalization", () => {
       voteCount: 1,
       viewerHasVoted: false,
     });
+  });
+
+  it("uses the cached question when Facebook omits it, else an empty string", () => {
+    const cached = normalizePoll("p1", [{ id: "1", text: "Yes", voters: [], voteCount: 0, viewerHasVoted: false }], "Do you agree?");
+    expect(cached.question).toBe("Do you agree?");
+
+    const uncached = normalizePoll("p2", [{ id: "1", text: "Yes", voters: [], voteCount: 0, viewerHasVoted: false }], null);
+    expect(uncached.question).toBe("");
   });
 });
 

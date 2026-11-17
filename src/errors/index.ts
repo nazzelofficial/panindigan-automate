@@ -13,8 +13,9 @@
 export type ErrorCode =
   // Authentication
   | "AUTH_INVALID_CREDENTIALS"
-  | "AUTH_SESSION_EXPIRED"
-  | "AUTH_LOGIN_REJECTED"
+  | "AUTH_SESSION_EXPIRED"        // Session rejected or ended — re-login required
+  | "AUTH_LOGIN_REJECTED"         // Facebook answered "Not logged in" (error 1357001)
+  | "AUTH_REFRESH_REQUIRED"       // Session too stale (error 1357004); an in-client refresh was attempted
   // Cookies
   | "COOKIE_MISSING"
   | "COOKIE_EXPIRED"
@@ -46,7 +47,11 @@ export type ErrorCode =
   | "MQTT_NOT_CONNECTED"
   // Plugins
   | "PLUGIN_LOAD_FAILED"
-  | "PLUGIN_LIFECYCLE_FAILED";
+  | "PLUGIN_LIFECYCLE_FAILED"
+  // Account protection (Stealth Guard halts)
+  | "ACCOUNT_RESTRICTED"
+  // Explicitly unavailable capability
+  | "NOT_IMPLEMENTED";
 
 export interface LibraryErrorOptions {
   /** Whether a retry of the failed operation could plausibly succeed. */
@@ -209,5 +214,26 @@ export class MQTTError extends LibraryError {
 export class PluginError extends LibraryError {
   constructor(message: string, code: ErrorCode, options: LibraryErrorOptions = {}) {
     super(message, code, options);
+  }
+}
+
+/**
+ * The requested capability does not exist in this build. Thrown instead of
+ * returning fabricated success — callers must handle this explicitly.
+ */
+export class NotImplementedError extends LibraryError {
+  constructor(message: string, options: LibraryErrorOptions = {}) {
+    super(message, "NOT_IMPLEMENTED", { ...options, retryable: false });
+  }
+}
+
+/**
+ * The Stealth Guard halted outbound operations to protect the account
+ * (circuit breaker open, or an hourly/daily send cap reached). Not a bug —
+ * backing off is the intended behavior. Inspect `context` for why.
+ */
+export class AccountRestrictedError extends LibraryError {
+  constructor(message: string, options: LibraryErrorOptions = {}) {
+    super(message, "ACCOUNT_RESTRICTED", { ...options, retryable: false });
   }
 }

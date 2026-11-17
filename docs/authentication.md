@@ -2,6 +2,16 @@
 
 Panindigan Automate connects to Facebook using valid browser session tokens rather than email and password credentials. This approach avoids automated bot checkpoints, 2FA bypass hurdles, and CAPTCHAs while maintaining maximum reliability.
 
+> Every snippet in this document using `client.login(...)` works identically with the top-level entry — just replace it with `await login(...)` and import `login` instead of `MessengerClient`:
+>
+> ```ts
+> import { login } from "panindigan-automate";
+> const client = await login("./appstate.json");
+> client.on("message", ...);
+> ```
+>
+> `login(credentials, options?, callback?)` returns the connected client; `client.login(credentials)` returns `{ userId, restored }`. Same credential formats in both. The `ready` event fires during `client.login()` / `login()` — attach handlers before it resolves (or attach afterwards and skip `ready` entirely; see the echo examples).
+
 ---
 
 ## Supported Credential Formats

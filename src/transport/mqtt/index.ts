@@ -135,6 +135,10 @@ export interface MqttTransportCallbacks {
   onSyncUpdate(cursor: SyncCursor): void;
   /** A non-fatal issue occurred. */
   onWarning(message: string, context: Readonly<Record<string, unknown>>): void;
+  /** A PINGREQ left the socket. Optional; the watchdog uses it when present. */
+  onPingSent?(): void;
+  /** A PINGRESP arrived. Optional; the watchdog uses it when present. */
+  onPongReceived?(): void;
 }
 
 /** A lightweight-service task submitted through {@link MqttTransport.lsRequest}. */
@@ -874,7 +878,10 @@ export class MqttTransport {
     });
     client.on("packetsend", (packet: Packet) => {
       if (generation !== this.#generation) return;
-      if (packet.cmd === "pingreq") this.#pendingPingAt = Date.now();
+      if (packet.cmd === "pingreq") {
+        this.#pendingPingAt = Date.now();
+        this.#deps.callbacks.onPingSent?.();
+      }
     });
     client.on("packetreceive", (packet: Packet) => {
       if (generation !== this.#generation) return;
@@ -882,6 +889,7 @@ export class MqttTransport {
       if (packet.cmd === "pingresp" && this.#pendingPingAt !== null) {
         this.#deps.diagnostics.recordHeartbeat(Date.now() - this.#pendingPingAt);
         this.#pendingPingAt = null;
+        this.#deps.callbacks.onPongReceived?.();
       }
     });
     client.on("error", (error) => {

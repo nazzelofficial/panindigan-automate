@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import {
   extractFacebookApiError,
+  extractMobileTokens,
   isLoggedOutHomePage,
   safeHomeDiagnostics,
   summarizeHomeDiagnostics,
@@ -115,5 +116,72 @@ describe("extractFacebookApiError", () => {
     const error = extractFacebookApiError('{"error":1357031}');
     expect(error).not.toBeNull();
     expect(error?.code).toBe("PERMISSION_BLOCKED");
+  });
+
+  it("maps the exact production envelope (error 1357004) to AUTH_REFRESH_REQUIRED", () => {
+    const error = extractFacebookApiError(
+      '{"error":1357004,"errorSummary":"Please Refresh","errorDescription":"Please try closing and re-opening your browser window.","errorIsRetryable":true}',
+    );
+
+    expect(error).not.toBeNull();
+    expect(error?.code).toBe("AUTH_REFRESH_REQUIRED");
+    expect(error?.message).toContain("Session needs refresh");
+  });
+
+  it("maps error 1357004 even with Facebook's anti-hijacking prefix", () => {
+    const error = extractFacebookApiError('for (;;);{"error":1357004}');
+    expect(error?.code).toBe("AUTH_REFRESH_REQUIRED");
+  });
+});
+
+describe("extractMobileTokens", () => {
+  it("scrapes fb_dtsg and jazoest from the server-rendered hidden inputs", () => {
+    const html =
+      '<html><body><form><input type="hidden" name="fb_dtsg" value="AbCdEf123_TOKEN" autocomplete="off" />' +
+      '<input type="hidden" name="jazoest" value="28911" autocomplete="off" /></form></body></html>';
+
+    const tokens = extractMobileTokens(html);
+    expect(tokens).not.toBeNull();
+    expect(tokens?.fbDtsg).toBe("AbCdEf123_TOKEN");
+    expect(tokens?.jazoest).toBe("28911");
+  });
+
+  it("derives jazoest from fb_dtsg when the page omits the hidden input", () => {
+    const html = '<input type="hidden" name="fb_dtsg" value="abc123" />';
+
+    const tokens = extractMobileTokens(html);
+    expect(tokens).not.toBeNull();
+    expect(tokens?.fbDtsg).toBe("abc123");
+    // computeJazoest: sum of char codes, prefixed with "2"
+    expect(tokens?.jazoest).toMatch(/^2\d+$/);
+  });
+
+  it("returns null when there is no fb_dtsg hidden input", () => {
+    expect(extractMobileTokens("<html><body>nothing</body></html>")).toBeNull();
+  });
+
+  it("returns null when fb_dtsg is present but empty", () => {
+    expect(extractMobileTokens('<input type="hidden" name="fb_dtsg" value="" />')).toBeNull();
+  });
+
+  it("handles real-world mobile surface HTML structure", () => {
+    // Trimmed from actual m.facebook.com response observed Nov 2026
+    const html = `
+      <form method="post" action="/login/?next&ref=dbl" id="login_form">
+        <input type="hidden" name="lsd" value="AVpU_LSD" autocomplete="off" />
+        <input type="hidden" name="jazoest" value="21234" autocomplete="off" />
+        <input type="hidden" name="m_ts" value="1700000000" />
+        <input type="hidden" name="li" value="xyz" />
+        <input type="hidden" name="try_number" value="0" />
+        <input type="hidden" name="unrecognized_tries" value="0" />
+        <input type="hidden" name="bi_xrwh" value="0" />
+        <input type="hidden" name="fb_dtsg" value="RealToken123:456:789" />
+      </form>
+    `;
+
+    const tokens = extractMobileTokens(html);
+    expect(tokens).not.toBeNull();
+    expect(tokens?.fbDtsg).toBe("RealToken123:456:789");
+    expect(tokens?.jazoest).toBe("21234");
   });
 });

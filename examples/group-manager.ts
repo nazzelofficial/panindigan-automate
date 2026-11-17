@@ -11,23 +11,18 @@
  *   or bun examples/group-manager.ts
  */
 
-import { MessengerClient, THREAD_COLORS } from "../src/index.js";
+import { login, THREAD_COLORS } from "../src/index.js";
 
-const client = new MessengerClient({
+const client = await login("./appstate.json", {
   logLevel: "info",
   persistSession: true,
 });
 
-let myUserId: string | undefined;
-
-client.on("ready", (event) => {
-  myUserId = event.userId;
-  console.log(`[group-bot] Ready as ${myUserId}`);
-});
+console.log("[group-bot] Logged in and listening.");
 
 // Welcome new members joining a group
 client.on("participant_join", async (event) => {
-  console.log(`[group] New participants joined thread ${event.threadId}:`, event.participants);
+  console.log(`[group] New participants joined thread ${event.threadId}:`, event.addedIds);
   await client.sendMessage(event.threadId, {
     type: "text",
     body: "Welcome to the group chat!",
@@ -36,7 +31,7 @@ client.on("participant_join", async (event) => {
 
 // Listen to command messages
 client.on("message", async (event) => {
-  if (event.senderId === myUserId || !event.body || !event.isGroup) {
+  if (event.isSelf || !event.body || !event.isGroup) {
     return;
   }
 
@@ -44,7 +39,7 @@ client.on("message", async (event) => {
 
   // Command: !ping
   if (text === "!ping") {
-    await client.sendReply(event.threadId, event.id, {
+    await client.sendReply(event.threadId, event.messageId, {
       type: "text",
       body: "Pong! Active and listening.",
     });
@@ -85,5 +80,3 @@ client.on("message", async (event) => {
     }
   }
 });
-
-await client.login("./appstate.json");

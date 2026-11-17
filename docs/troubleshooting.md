@@ -9,16 +9,18 @@ Common questions, error resolutions, and debugging techniques when running Panin
 Panindigan Automate throws specific, typed error classes. You can catch them using `instanceof`:
 
 ```ts
-import { 
-  CookieError, 
-  AuthenticationError, 
-  NetworkError, 
-  APIError, 
-  ValidationError 
+import {
+  login,
+  CookieError,
+  AuthenticationError,
+  NetworkError,
+  APIError,
+  ValidationError,
 } from "panindigan-automate";
 
 try {
-  await client.login("./appstate.json");
+  const client = await login("./appstate.json");
+  void client;
 } catch (error) {
   if (error instanceof CookieError) {
     console.error("Expired or missing cookies. Please re-export from your browser.");
@@ -59,7 +61,15 @@ try {
 * **Cause**: Facebook's response to `GET /home.php` was not a page at all — it was a tiny JSON error envelope (seen in production as `status=200 path=/home.php bytes=249`), which means the session is not authenticated — or expired/revoked/checkpoint-flagged — at the HTTP layer. The `Accept` header this library now sends (`text/html,...`) will cause Facebook to answer with the real page on newer deployments; older builds sent `*/*` and always got the JSON envelope back.
 * **Fix**: The error now tells you exactly what Facebook answered. Re-export your cookies from a browser where the account is confirmed logged in, switch to a non-restricted account if the current one was flagged, and redeploy. If Facebook still rejects the session on a confirmed-fresh export, the account itself is blocked — no library can bypass that; appeal to Meta, or run the bot from an account Facebook trusts.
 
-### 6. `APIError: Facebook rejected the message edit`
+### 6. `AuthenticationError: Facebook rejected the session — session is too stale to reuse (error 1357004)`
+* **Cause**: Facebook's current stack answers `home.php` for an inactive-but-alive session with `{"error":1357004}` (the envelope seen in production as `status=200 path=/home.php bytes=249`), which fbchat documents as "client has been inactive for too long". Your cookies are still accepted server-side, but your `fb_dtsg`/`jazoest` pair is too old to trust. Since 0.1.7 the library attempts the standard recovery — scrape fresh tokens from the mobile surface and retry `home.php` once — and only then throws `AUTH_REFRESH_REQUIRED`.
+* **Fix**:
+  1. Open Facebook in your browser, confirm you can see your feed.
+  2. Export fresh `appstate.json` (EditThisCookie / Cookie-Editor) and redeploy.
+  3. If the error persists on a confirmed-fresh export from a residential connection, the account is restricted — check facebook.com for restriction notices; no library can bypass an account-level block.
+* **Why it keeps happening**: cookies age. `fb_dtsg` is rotated frequently; your refreshed session may die within days on a heavily automated account. Re-export cookies weekly — the library keeps `fb_dtsg`/`jazoest` rotated automatically, but only while cookies remain valid.
+
+### 7. `AuthenticationError: Facebook rejected the message edit`
 * **Cause**: Trying to edit a message that:
   - Was sent by another user (you can only edit your own messages).
   - Was sent more than 15 minutes ago (Facebook's native edit window limit).
@@ -86,7 +96,9 @@ console.log("Process Memory (MB):", Math.round(snapshot.process.heapUsed / 1024 
 If you encounter an unexpected behavior, set `logLevel: "debug"` or `"trace"`:
 
 ```ts
-const client = new MessengerClient({
+import { login } from "panindigan-automate";
+
+const client = await login("./appstate.json", {
   logLevel: "debug",
   prettyPrint: true, // Needs pino-pretty installed
 });

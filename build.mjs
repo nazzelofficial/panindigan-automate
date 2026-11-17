@@ -1,5 +1,5 @@
 import { execSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 
 /**
  * Build orchestrator for Panindigan Automate.
@@ -32,6 +32,22 @@ function cleanDist() {
 function markCjs() {
   mkdirSync("dist/cjs", { recursive: true });
   writeFileSync("dist/cjs/package.json", `${JSON.stringify({ type: "commonjs" }, null, 2)}\n`, "utf8");
+
+  // Make require("panindigan-automate") itself callable (fca-style entry):
+  // re-export the default (login) function as module.exports with all named
+  // exports attached. Existing named imports and destructuring keep working.
+  const cjsEntry = "dist/cjs/index.js";
+  const source = readFileSync(cjsEntry, "utf8");
+  const shim =
+    "\n// CommonJS convenience shim: require(\"panindigan-automate\") is callable.\n" +
+    "const __panindigan_login = module.exports.default;\n" +
+    "if (typeof __panindigan_login === \"function\") {\n" +
+    "  module.exports = Object.assign(__panindigan_login, module.exports, {\n" +
+    "    default: __panindigan_login,\n" +
+    "    login: __panindigan_login,\n" +
+    "  });\n" +
+    "}\n";
+  writeFileSync(cjsEntry, source + shim, "utf8");
 }
 
 function npx(command) {

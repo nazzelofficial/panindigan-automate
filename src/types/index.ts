@@ -7,6 +7,7 @@
  */
 
 import type { Logger, LogTransport } from "../logger/index.js";
+import type { StealthConfig, SuspensionSignal } from "../stealth/index.js";
 
 export type { LogTransport };
 
@@ -170,6 +171,51 @@ export interface ClientOptions {
   readonly validateOnLogin?: boolean | undefined;
   /** Plugins to register at construction. */
   readonly plugins?: readonly PluginRegistration[] | undefined;
+  /**
+   * Stealth Guard overrides. Defaults: `enabled: true`, conservative caps
+   * (30/thread/hour, 100/hour and 200/day globally), 7-day warmup, 24h
+   * cooldown. Pass `{ enabled: false }` to disable entirely.
+   */
+  readonly stealth?: Partial<StealthConfig> | undefined;
+  /**
+   * Dry-run mode: every outbound operation logs the payload it *would*
+   * send and none of it hits the network. Results are synthetic and
+   * clearly tagged. Default `false`.
+   */
+  readonly dryRun?: boolean | undefined;
+  /**
+   * E2EE for 1:1 threads — a faithful port of bhhoang/fbapi-unofficial's
+   * Signal Protocol + Noise XX transport (MIT), with attribution in the
+   * source files. `"auto"` connects at login and enables encrypted 1:1
+   * sends/receives; `"require"` fails login when the encrypted channel
+   * cannot be established; `"off"` (default) leaves it disabled.
+   *
+   * Scope in this release: text messages only, 1:1 threads. Group chats
+   * (sender keys), attachments and encrypted backup restore are NOT
+   * implemented. The device identity persists at
+   * `<storageDirectory>/e2ee_device.json` unless `deviceStorePath` is set —
+   * keep the file; deleting it re-registers a new device.
+   */
+  readonly e2ee?:
+    | "auto"
+    | "require"
+    | "off"
+    | {
+        readonly enabled?: boolean | undefined;
+        readonly require?: boolean | undefined;
+        readonly autoConnect?: boolean | undefined;
+        readonly selfListen?: boolean | undefined;
+        readonly deviceListCacheMs?: number | undefined;
+        readonly deviceStorePath?: string | undefined;
+      }
+    | undefined;
+  /** Update checker. Announce-only by default; install is an explicit call. */
+  readonly update?: {
+    /** Master switch. Default `false` — nothing checks without opt-in. */
+    readonly enabled?: boolean | undefined;
+    /** Minimum ms between registry checks. Default once per day. */
+    readonly checkIntervalMs?: number | undefined;
+  } | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +774,87 @@ export interface RawDeltaEvent extends BaseEventPayload {
   readonly payload: unknown;
 }
 
+/** A suspension signal was observed. */
+export interface SuspensionWarningEvent extends BaseEventPayload {
+  readonly type: "suspension_warning";
+  readonly signal: SuspensionSignal;
+}
+
+/** The circuit breaker opened; proactive sends are halted. */
+export interface SuspensionHaltEvent extends BaseEventPayload {
+  readonly type: "suspension_halt";
+  readonly reason: string;
+  /** Milliseconds until the earliest possible reset. */
+  readonly cooldownMs: number;
+}
+
+/** A manual guard reset succeeded after the cooldown. */
+export interface SuspensionResetEvent extends BaseEventPayload {
+  readonly type: "suspension_reset";
+}
+
+/** Facebook demanded an identity verification (checkpoint). */
+export interface CheckpointEvent extends BaseEventPayload {
+  readonly type: "checkpoint";
+  readonly operation: string;
+  readonly code: number | string | undefined;
+  readonly detail: string;
+}
+
+/** Session health dropped to the warning band. */
+export interface HealthWarningEvent extends BaseEventPayload {
+  readonly type: "health_warning";
+  readonly score: number;
+}
+
+/** Session health dropped to the critical band. */
+export interface HealthCriticalEvent extends BaseEventPayload {
+  readonly type: "health_critical";
+  readonly score: number;
+}
+
+/** The session died mid-run and could not be re-validated; halted. */
+export interface SessionDeadEvent extends BaseEventPayload {
+  readonly type: "session_dead";
+  readonly reason: string;
+}
+
+/** Outbound behavior is trending toward restriction risk. */
+export interface RiskRisingEvent extends BaseEventPayload {
+  readonly type: "risk_rising";
+  readonly metric: string;
+  readonly detail: string;
+}
+
+/** An encrypted message received (or failed to decrypt). */
+export interface E2eeMessageEvent extends MessageEventBase {
+  readonly type: "e2ee_message";
+  readonly isE2EE: true;
+  /** False when decryption failed; body is null in that case. */
+  readonly decryptFailed: boolean;
+}
+
+/** An edit to an encrypted message. */
+export interface E2eeMessageEditEvent extends BaseEventPayload {
+  readonly type: "e2ee_message_edit";
+  readonly isE2EE: true;
+  readonly threadId: string;
+  readonly messageId: string;
+  readonly newBody: string | null;
+  readonly decryptFailed: boolean;
+}
+
+/** A reaction on an encrypted message. */
+export interface E2eeMessageReactionEvent extends BaseEventPayload {
+  readonly type: "e2ee_message_reaction";
+  readonly isE2EE: true;
+  readonly threadId: string;
+  readonly messageId: string;
+  readonly userId: string;
+  readonly emoji: string | null;
+  readonly isSelf: boolean;
+}
+
 /** Mapping of event names to payload types. */
 export interface EventPayloadMap {
   readonly ready: ReadyEvent;
@@ -753,6 +880,17 @@ export interface EventPayloadMap {
   readonly warning: WarningEvent;
   readonly debug: DebugEvent;
   readonly raw: RawDeltaEvent;
+  readonly suspension_warning: SuspensionWarningEvent;
+  readonly suspension_halt: SuspensionHaltEvent;
+  readonly suspension_reset: SuspensionResetEvent;
+  readonly checkpoint: CheckpointEvent;
+  readonly health_warning: HealthWarningEvent;
+  readonly health_critical: HealthCriticalEvent;
+  readonly session_dead: SessionDeadEvent;
+  readonly risk_rising: RiskRisingEvent;
+  readonly e2ee_message: E2eeMessageEvent;
+  readonly e2ee_message_edit: E2eeMessageEditEvent;
+  readonly e2ee_message_reaction: E2eeMessageReactionEvent;
 }
 
 /** Names of all emittable events. */
@@ -936,6 +1074,42 @@ export interface EventDiagnostics {
   readonly counts: Readonly<Record<string, number>>;
 }
 
+/** Export file format for the diagnostics report. */
+export type DiagnosticsExportFormat = "json" | "html";
+
+/** Stealth Guard counters and the guard audit log, when the guard is enabled. */
+export interface StealthDiagnostics {
+  readonly enabled: boolean;
+  readonly circuitState: string;
+  readonly warmupDay: number;
+  readonly warmupMultiplier: number;
+  readonly signalsInWindow: number;
+  readonly haltedAt: number | null;
+  readonly caps: {
+    readonly hour: { readonly count: number; readonly limit: number; readonly level: string };
+    readonly day: { readonly count: number; readonly limit: number; readonly level: string };
+  };
+  readonly healthScore: number | null;
+  /** Present when thread heat is tracked (own traffic only). */
+  readonly threads?: {
+    readonly tracked: number;
+    readonly hottest: readonly {
+      readonly threadId: string;
+      readonly score: number;
+    }[];
+  } | undefined;
+  readonly audit: {
+    readonly total: number;
+    readonly recent: readonly {
+      readonly at: number;
+      readonly decision: string;
+      readonly reason: string;
+      readonly operation?: string | undefined;
+      readonly target?: string | undefined;
+    }[];
+  };
+}
+
 /** Process counters. */
 export interface ProcessDiagnostics {
   readonly nodeVersion: string;
@@ -954,6 +1128,8 @@ export interface DiagnosticsSnapshot {
   readonly cache: CacheDiagnostics;
   readonly events: EventDiagnostics;
   readonly process: ProcessDiagnostics;
+  /** Present when the Stealth Guard is wired up. */
+  readonly stealth?: StealthDiagnostics | undefined;
 }
 
 /** Handle exposed as `client.diagnostics`. */
@@ -962,4 +1138,8 @@ export interface DiagnosticsHandle {
   getSnapshot(): DiagnosticsSnapshot;
   /** Zeroes every counter. */
   reset(): void;
+  /** Self-contained JSON export of the snapshot. */
+  exportJSON(): string;
+  /** Self-contained HTML export of the snapshot (inline CSS, no external assets). */
+  exportHTML(): string;
 }

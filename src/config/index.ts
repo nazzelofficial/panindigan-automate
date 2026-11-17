@@ -274,8 +274,19 @@ function splitOptions(options: ClientOptions): {
     logTransports,
     storageAdapter,
     plugins,
+    // Structured options consumed elsewhere (constructor/guard/E2EE/update).
+    // They are not scalar config values; keeping them out of the zod scalar
+    // schema so .strict() still catches typos in the keys it does own.
+    stealth: _stealth,
+    dryRun: _dryRun,
+    e2ee: _e2ee,
+    update: _update,
     ...rest
   } = options;
+  void _stealth;
+  void _dryRun;
+  void _e2ee;
+  void _update;
 
   const restRecord = rest as Record<string, unknown>;
   if (restRecord["logFile"] === "") {

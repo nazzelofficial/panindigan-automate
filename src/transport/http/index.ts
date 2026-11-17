@@ -975,6 +975,15 @@ export function interpretFacebookError(operation: string, json: unknown): Librar
         return new AuthenticationError(`"Not logged in" while calling "${operation}"`, "AUTH_LOGIN_REJECTED", {
           context: { operation, code: error },
         });
+      case 1357004:
+        // "Session too stale — fb_dtsg must be refreshed". The client's
+        // login/cookie-refresh flows attempt an in-flight recovery
+        // (mobile-surface token rotation); the interpreter only classifies.
+        return new AuthenticationError(
+          `"Session needs refresh" while calling "${operation}" (error 1357004)`,
+          "AUTH_REFRESH_REQUIRED",
+          { context: { operation, code: error } },
+        );
       case 1357031:
         return new PermissionError(
           `Cannot perform "${operation}": Facebook rejected it (code 1357031)`,

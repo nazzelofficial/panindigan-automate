@@ -1,34 +1,24 @@
-name: CI
+name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
 
 jobs:
   test:
-    name: Test on Node ${{ matrix.node-version }} (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        node-version: [22, 26]
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v4
         with:
-          version: 12.16.1
+          version: 12.21.0
 
-      - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -37,8 +27,15 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Run test suite
-        run: pnpm test
+      - name: Tests
+        run: pnpm run test
 
-      - name: Verify dual build
-        run: pnpm run build
+      - name: Pack smoke check
+        run: |
+          pnpm pack --pack-destination /tmp
+          size=$(stat -c%s /tmp/panindigan-automate-*.tgz)
+          echo "tarball size: $size bytes"
+          if [ "$size" -gt 3000000 ]; then
+            echo "::error::pack grew beyond 3MB — inspect what leaked in"
+            exit 1
+          fi

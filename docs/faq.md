@@ -48,7 +48,9 @@ pm2 startup
 **Yes.** Supply your HTTP or SOCKS5 proxy in the client configuration:
 
 ```ts
-const client = new MessengerClient({
+import { login } from "panindigan-automate";
+
+const client = await login("./appstate.json", {
   httpProxy: "socks5://username:password@proxy.example.com:1080",
 });
 ```

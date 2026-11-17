@@ -7,25 +7,17 @@
  *   or bun examples/echo-bot.ts
  */
 
-import { MessengerClient } from "../src/index.js";
+import { login } from "../src/index.js";
 
-const client = new MessengerClient({
+const client = await login("./appstate.json", {
   logLevel: "info",
-  persistSession: true,
-});
-
-let myUserId: string | undefined;
-
-// Emitted once login and realtime MQTT connection are ready
-client.on("ready", (event) => {
-  myUserId = event.userId;
-  console.log(`[bot] Logged in successfully as user ${myUserId}`);
+  persistSession: true, // Persists session cookies and sync cursor across restarts
 });
 
 // Emitted for every incoming message
 client.on("message", async (event) => {
   // Ignore messages sent by the bot itself or messages with empty bodies
-  if (event.senderId === myUserId || !event.body) {
+  if (event.isSelf || !event.body) {
     return;
   }
 
@@ -38,10 +30,7 @@ client.on("message", async (event) => {
   });
 });
 
-// Emitted when a connection drop occurs and client is reconnecting
+// Catch warning and error events
 client.on("warning", (event) => {
   console.warn(`[warning] ${event.message}`);
 });
-
-// Log in using exported browser cookies/appstate
-await client.login("./appstate.json");

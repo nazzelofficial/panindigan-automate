@@ -10,6 +10,84 @@ All notable changes to this project are documented in this file. The format is b
 - Sentry (`@sentry/node`) log transport
 - OpenTelemetry tracing hooks for the diagnostics module
 
+## [0.1.7] - 2026-11-16
+
+### Added
+
+- **Compatibility `login()` entry point** — the main documented entry: `import { login } from "panindigan-automate"` in ESM and `const { login } = require("panindigan-automate")` in CommonJS. Also exported as the default (and `require("panindigan-automate")` is callable fca-style). Promise and callback signatures both work, with the same `ClientOptions` object as `new MessengerClient(options)`; `new MessengerClient()` remains fully supported for explicit construction and the `ready` event. This is a thin convenience over `MessengerClient#login` — new code should prefer `login()` or the constructor. README, quick-start, migration guide, api-reference and the bundled examples now lead with `import { login }`.
+- **Stealth Guard** (`client.stealth`): outbound account protection, all wired into every mutating method in the client (send, edit, unsend, forward, reactions, group mutations, polls, mute/archive/delete).
+  - **Suspension signal detector** (A1): restriction codes and messages across HTTP responses, GraphQL errors, MQTT control-plane payloads, and raw text — checkpoint/identity verification (`1357001`, `1357004`, `392024945`, 202, 459, …), spam/abuse flags, rate limits (`429`, `1675035`), messaging restrictions (`2061011`, `1545012`, `1545014`, `368`), session death (`190`, `102`, `460`, `463`, `467`). Severity ladder `warn < pause < halt < critical`. Text patterns are only matched on the control plane — chat content never can halt the bot.
+  - **Circuit breaker** (A2): `signalThreshold` halting signals inside `signalWindow` → open circuit; all proactive sends reject with `AccountRestrictedError` (code `ACCOUNT_RESTRICTED`); emits `suspension_halt`; manual `client.stealth.reset()` after the cooldown (default 24h). Resumes on nothing automatically — a halt after `critical` stays halted until you reset.
+  - **Sliding-window caps** (A4): hard hourly/daily counters — defaults 30 messages per thread per hour, 100/hour and 200/day globally. Crossing 80% doubles pacing (warning); 100% halts proactive sends until the window resets; the per-thread cap is bounded and tracked per target.
+  - **Token buckets + in-flight bound** (A3): per-operation buckets (`sendMessage` / `addReaction` / `createGroup` / `global` with burst + sustained refill) and a max of 5 in-flight calls per operation+target, counted before completion.
+  - **Warmup mode** (A5): fresh sessions ramp from 30% of cap to 100% over `warmupDays` (default 7), persisted across restarts.
+  - **Natural pacing** (A6): randomized inter-operation delay (`basePacingMs` × jitter) unless `pacingEnabled: false`; doubled under cap warnings.
+  - **Checkpoint realtime guard** (A9): checkpoint-class signals force the circuit open immediately (`forceHalt`) and emit `checkpoint`; retries against checkpoints never happen.
+  - **State persistence**: circuit state, signal history, warmup progress, caps, and warmup day survive restarts.
+  - **Guard audit log** (G8): ring buffer of the last 200 guard decisions (allow/deny/halt/cap/reset/…) with reasons — exported via diagnostics, never leaves the process policy by itself.
+- **Session health score** (G1): `health_warning` / `health_critical` events; score shown in `diagnostics` and in the guard callbacks.
+- **Risk forecast** (G2): hour-over-hour send-volume acceleration emits `risk_rising` before any restriction signal fires.
+- **Guard diagnostics export** (F3): `client.diagnostics.exportJSON()` / `exportHTML()` — self-contained report (HTTP latency percentiles, MQTT queue, guard counters, audit log) attached to incidents; no upload.
+- **Error code registry** (F5): `docs/error-codes.md` — every `error.code` with meaning and the action to take.
+- **Idempotent send** (G5): every send computes a client-side idempotency key; retries of an identical send return the cached message id instead of posting a duplicate (24h TTL, persisted).
+- **Adaptive chunking** (G3): text bodies over 2000 chars split at sentence/paragraph/line/word boundaries with reading-time inter-chunk delays; mentions disable chunking; disabled with `chunking.enabled: false`.
+- **Thread heat index** (G4): local, own-traffic-only per-thread activity ranking exposed in `diagnostics` (`stealth.threads.tracked`, `stealth.threads.hottest`). No message content involved.
+- **Dry-run mode** (G6): `dryRun: true` — every outbound operation logs the payload it would send; nothing touches the network; results are clearly synthetic.
+- **E2EE (End-to-End Encryption) — experimental, 1:1 only.** A faithful TypeScript **port** of [bhhoang/fbapi-unofficial](https://github.com/bhhoang/fbapi-unofficial)'s `src/e2ee/` (MIT), with attribution in each ported file. Not a from-scratch reimplementation.
+  - **Signal Protocol** — X3DH key agreement with XEdDSA-signed prekeys, Double Ratchet style ratcheting
+  - **Noise XX handshake** — WebSocket transport over `wss://web-chat-e2ee.facebook.com/ws/chat` with AES-256-GCM frames
+  - **WA Binary Protocol** — stanza codec (tokens, dictionaries, JIDs, packed strings, zlib-aware unmarshal)
+  - **Send and receive encrypted 1:1 text** — `sendEncryptedMessage()`, events `e2ee_message`, `e2ee_message_edit`, `e2ee_message_reaction` (unsends surface as `message_unsend`)
+  - **Device persistence** — identity and prekeys persist at `<storageDirectory>/e2ee_device.json` (atomic writes, owner-only)
+  - **Deliberately not in this release** — group E2EE (sender keys), E2EE attachments, encrypted backup restore. Group threads throw `NotImplementedError`; there is no fallback that silently sends plaintext.
+  - **Honest status:** offline tests (WA/protobuf codec, RFC 5869 HKDF, XEdDSA, full X3DH round trip between two device stores, Noise XX client handshake vs an in-memory reference server) pass. **Live behavior against real Facebook has not been verified by the authors.** Connecting registers an E2EE device on the account; use a throwaway account first and expect breakage if Facebook changes the protocol.
+- **Safe update checker** (B): announce-only by default (disabled until `update.enabled: true`); checks the registry at most once per `checkIntervalMs` (default 24h); `client.update.check()` reports; `client.update.install()` is an explicit call — prints a plan, backs up the installed package, installs, rolls back on failure; restart is yours. `panindigan-automate doctor` (`bin`) checks Node, cookies, storage writability, facebook.com reachability and MQTT edge reachability; `--login` optionally performs a real end-to-end login.
+- **Group tools** (E): `getThreadColorList()` — the verifiable registry of theme ids (hex is rejected by Facebook since ~2019); `changeGroupTheme` accepts a registry name or raw numeric theme id; `changeGroupAvatar` alias; `muteThread(duration?: number | "always")` validates minutes (1–525600) or `"always"`.
+- **Examples**: `examples/` — echo bot, dry-run demo, group manager, warmup-aware broadcast, E2EE demo.
+- **CI**: `.github/workflows/ci.yml` — typecheck, tests, pack smoke check.
+- Public API surface: `StealthGuard`, `SuspensionDetector`, guard primitives, `E2EEClient` and the `e2ee/` modules, `GuardAuditLog`, `UpdateChecker`, `isOlder`.
+
+### Removed
+
+- The experimental `e2ee.bridge: "fb-messenger-e2ee"` bridge and `FMEMessengerBridge` were **removed**. The E2EE surface is a port of bhhoang/fbapi-unofficial's `src/e2ee/` (MIT, included in this package's source); there is no longer any option to delegate to an external AGPL client from inside this package, and no `@noble/curves` — the ported code uses Node's built-in crypto (X25519, Ed25519-family verification via XEdDSA). `E2EE_BRIDGE_NOT_INSTALLED` is kept as a compatibility-only code but is not raised.
+
+### Fixed
+
+- **Structured constructor options were rejected at validation time.** `splitOptions` passed every non-scalar key (`dryRun`, `stealth`, `e2ee`, `update`, …) into the strict scalar Zod schema, so documented options like `{ dryRun: true }`, `{ stealth: { enabled: false } }`, `{ e2ee: "auto" }` and `{ update: { enabled: true } }` threw `ValidationError: Unrecognized key` at construction. They are now routed around the scalar validator (typo detection for the scalar keys is retained) — regression coverage added in `tests/login.test.ts`.
+- **1357004 ("session needs refresh") recovery — actually shipped this time.** An intermediate working state had replaced the recovery with a stub that unconditionally returned failure (and claimed modern Facebook makes it unrecoverable); that claim was disproven by the maintained references. The client once again refreshes `fb_dtsg`/`jazoest` from the mobile surface with `withDefaults: false` (so the stale tokens are not sent back) and retries `home.php` once. If that also fails, the cookies are revoked beyond recovery: login fails with `AUTH_REFRESH_REQUIRED` (`retryable: false`) and a re-export instruction, and the guard freezes outbound sends.
+- 1357004 maps to `AUTH_REFRESH_REQUIRED` at the interpreter (an intermediate work state had folded it into `AUTH_SESSION_EXPIRED` without the recovery attempt).
+- Version mismatch: `VERSION` was `0.1.7` while `package.json` said `0.1.8` in an unreleased working state; both now say `0.1.7`.
+- **THREAD_COLORS were non-functional** — they carried hex strings, but Facebook's theme mutation takes theme ids; the set is now the verified theme-id registry. Arbitrary hex can no longer be passed silently.
+- Invite links (`createInviteLink` / `joinGroupByLink`): throw `NotImplementedError` — no maintained client implements them and no publicly verifiable endpoint exists. The previous silent-hex acceptance was a footgun; this fails loud instead.
+- Poll question caching documented: `poll` events populate `#pollQuestions`; `getPoll()` reads the cached question when Facebook omits it, else falls back to `""`. Behavior covered by `normalizePoll` tests.
+- `client.stealth.getWarmupMultiplier()` no longer persists on every read (only on day change), matching the documented behavior.
+
+### Security
+
+- Checkpoint signals are never retried — the guard freezes on first critical checkpoint signal.
+- No secret ever reaches diagnostics, the guard audit log, or the error registry — only severities, codes, and non-secret context.
+- E2EE device keys and session state persist in the device store with owner-only permissions — keep this file secure. The E2EE code is a port of bhhoang/fbapi-unofficial (MIT); no separate crypto library is bundled. XEdDSA-signed prekeys and X25519 sessions are verified by the offline tests, but the protocol path against live Facebook is unverified — treat it as experimental.
+
+### Notes
+
+- Nothing between 0.1.6 and this release was published; 0.1.7 is the next sequential release after 0.1.6.
+- The docs and `examples/` now lead with `import { login } from "panindigan-automate"` (or `const { login } = require(...)`); `new MessengerClient(...)` remains documented for explicit construction and the `ready` event.
+- Stealth Guard reduces account restriction risk; it cannot make an automated personal account "safe" — Facebook's systems change without notice. Re-export cookies periodically and reset the guard manually after checkpoints.
+
+## [0.1.6] - 2026-11-15
+
+### Added
+
+- Automatic recovery from Facebook's error `1357004` ("session needs refresh"), the exact envelope observed in production (`status=200, bytes=249, {"error":1357004}`). The login and cookie-refresh flows now detect this envelope, refresh `fb_dtsg`/`jazoest` from the server-rendered mobile surface (`m.facebook.com/`, hidden-input scrape — the same rotation web/mobile clients perform), and retry `home.php` once. When the refresh yields nothing or the retry still returns `1357004`, login fails with `AUTH_REFRESH_REQUIRED` (retryable only at the HTTP layer) and the session is torn down — never silently retried or bypassed.
+- New error code `AUTH_REFRESH_REQUIRED` in `ErrorCode` and `interpretFacebookError` maps `1357004` to it (previously surfaced as the generic `API_ERROR`).
+- `extractMobileTokens()` in `src/client/home.ts` — scrapes `fb_dtsg`/`jazoest` hidden inputs from the mobile surface; derives `jazoest` via `computeJazoest` when the page omits it. `safeHomeDiagnostics` unchanged (no values logged, ever).
+- Regression tests for the `1357004` mapping (including the exact production envelope and the anti-hijacking `for (;;);` prefix) and for `extractMobileTokens`; suite passes at 124 tests.
+
+### Fixed
+
+- **Critical:** `#refreshSessionTokens()` now correctly passes `withDefaults: false` when fetching from `m.facebook.com/`. Previously, the mobile token refresh request incorrectly attempted to include `fb_dtsg`/`jazoest` (the very tokens being refreshed), causing the request to fail with missing or stale tokens. The mobile surface only requires basic authentication cookies (`c_user`, `xs`, `datr`), not CSRF tokens. This fix ensures error `1357004` recovery works as designed — matching how browser clients handle stale sessions.
+- `home.php` scrapes (login and cookie refresh) send a browser-like `Accept: text/html,...` header, so Facebook answers with the HTML shell instead of the JSON error envelope on newer stacks — while the JSON-envelope interpreter remains as a precise detector when it happens anyway.
+
 ## [0.1.5] - 2026-11-15
 
 ### Fixed

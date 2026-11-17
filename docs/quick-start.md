@@ -54,26 +54,18 @@ Panindigan Automate connects to Facebook as an authorized browser session, so yo
 Create a `bot.ts` file with an echo bot implementation:
 
 ```ts
-import { MessengerClient } from "panindigan-automate";
+import { login } from "panindigan-automate";
 
-// Initialize client
-const client = new MessengerClient({
+// 1. Authenticate — resolves with the connected, typed client
+const client = await login("./appstate.json", {
   logLevel: "info",
-  persistSession: true, // Persists session cookies and sequences across restarts
-});
-
-let botUserId: string;
-
-// 1. Ready event fires once authenticated and MQTT socket is connected
-client.on("ready", (event) => {
-  botUserId = event.userId;
-  console.log(`[ready] Connected as user: ${botUserId}`);
+  persistSession: true, // Persists session cookies and sync cursor across restarts
 });
 
 // 2. Listen to incoming messages in direct and group chats
 client.on("message", async (event) => {
-  // Prevent replying to the bot's own messages or empty notifications
-  if (event.senderId === botUserId || !event.body) {
+  // Skip the bot's own messages and empty notifications
+  if (event.isSelf || !event.body) {
     return;
   }
 
@@ -104,10 +96,16 @@ client.on("warning", (event) => {
 client.on("error", (event) => {
   console.error(`[error]`, event.error);
 });
-
-// 5. Authenticate and start
-await client.login("./appstate.json");
 ```
+
+> **Looking for the `ready` event?** `login()` resolves *after* the realtime connection is authenticated, so there is no `ready` left to catch — you get the connected client directly. Handlers attached afterwards still receive subsequent events. If you specifically need `ready` (or want to attach handlers before authentication), use the modern constructor directly:
+>
+> ```ts
+> import { MessengerClient } from "panindigan-automate";
+> const client = new MessengerClient();
+> client.on("ready", (event) => console.log("connected", event.userId));
+> await client.login("./appstate.json");
+> ```
 
 ---
 
@@ -133,6 +131,5 @@ Your bot is online and ready to receive messages!
 
 ## Next Steps
 
-- Explore the complete [API Reference](api-reference.md) for reactions, attachments, and polls.
+- Explore the complete [API Reference](api-reference.md) for reactions, attachments, polls, and the middleware/plugin system.
 - Learn about the [Authentication](authentication.md) system and automatic cookie refresh.
-- Check [Middleware](middleware.md) to intercept incoming messages and commands.

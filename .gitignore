@@ -6,6 +6,8 @@ node_modules/
 
 # Session state and credential files (prevent accidental commit)
 panindigan-session/
+panindigan-fca-e2ee/
+panindigan-e2ee/
 *.session.json
 appstate*.json
 cookies*.json

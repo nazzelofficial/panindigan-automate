@@ -11,7 +11,7 @@
 export const LIBRARY_NAME = "panindigan-automate";
 
 /** Library version. Mirrors package.json. */
-export const VERSION = "0.1.5";
+export const VERSION = "0.1.7";
 
 /**
  * Default User-Agent: a reduced Chrome UA string. The major version is kept
@@ -153,71 +153,54 @@ export const CACHE_TAGS = {
   presence: "presence",
 } as const;
 
-/** Official Messenger thread colors accepted by the color mutation. */
+/**
+ * Messenger thread colors accepted by the theme mutation.
+ *
+ * Since ~2019 Facebook does not accept arbitrary hex values for thread
+ * themes — the mutation takes the theme id. These ids are the exact set the
+ * actively maintained clients ship and validate against the live API
+ * (fca-unofficial, actions/threadColors, verified Nov 2026).
+ */
 export const THREAD_COLORS = {
-  MessengerBlue: "0000ff",
-  GoldenPoppy: "f2ba0c",
-  RadicalRed: "f44236",
-  ShoobertShoe: "a442f4",
-  Pumpkin: "fa810d",
-  LightBlue: "5ec1ff",
-  BrightPink: "ff5ca1",
-  OrangeSoda: "ff7f4b",
-  NeonGreen: "5bfbaa",
-  Aqua: "30d5c8",
-  RobinsEggBlue: "00c6ff",
-  RoseGold: "f5b9d4",
-  LavenderPurple: "bdaef4",
-  Mango: "ffc300",
-  NeonBlue: "1987ff",
-  LightGreen: "9ef5c6",
-  PicnicGreen: "54d267",
-  PinkHeart: "ffafbe",
-  GrayBlue: "adaff4",
-  Cleopatra: "ffb379",
-  SteelBlue: "6b98f4",
-  Periwinkle: "8c9fd6",
-  Coral: "fa9e91",
-  Salmon: "ff8f80",
-  NeonRose: "ff5c8d",
-  NeonMint: "9fffce",
-  SpaceBlack: "000000",
-  Cardinal: "d51b21",
-  Deer: "a95065",
-  WildSand: "d5d0cd",
-  Fern: "55ae4c",
-  Copper: "c97941",
-  Saffron: "ffb673",
-  CeruleanBlue: "0072d6",
-  ShockingOrange: "ff7c40",
-  FuchsiaPink: "e85ab4",
-  RobinsEgg: "00c8c8",
-  Bamboo: "d0c8b2",
-  OldPricetag: "837775",
-  BrightTeal: "28cfd1",
-  GreenApple: "4bd677",
-  DeepOrange: "ff5722",
-  ArcticWhite: "f0f0f4",
-  Antelope: "caaca2",
-  Gray: "a0a0a0",
-  Cantaloupe: "ffa900",
-  Banana: "ffe600",
-  Avocado: "a9d34a",
-  Lime: "b7dc1c",
-  Blueberry: "00a1f1",
-  BlueJay: "4a9cf5",
-  DeepPurple: "8a2be2",
-  Amethyst: "9b59b6",
-  Ruby: "e0115f",
-  DeepPink: "ff1493",
-  Mandarin: "ff7847",
-  OrangePeel: "ff9f00",
-  NeonCarrot: "ff9933",
-  CadmiumYellow: "fff600",
-  Eggplant: "614051",
-  Coffee: "6f4e37",
-  Mocha: "967259",
+  MessengerBlue: "196241301102133",
+  DefaultBlue: "196241301102133",
+  Viking: "1928399724138152",
+  TealBlue: "1928399724138152",
+  GoldenPoppy: "174636906462322",
+  Yellow: "174636906462322",
+  RadicalRed: "2129984390566328",
+  Red: "2129984390566328",
+  Shocking: "2058653964378557",
+  LavenderPurple: "2058653964378557",
+  FreeSpeechGreen: "2136751179887052",
+  Green: "2136751179887052",
+  Pumpkin: "175615189761153",
+  Orange: "175615189761153",
+  LightCoral: "980963458735625",
+  CoralPink: "980963458735625",
+  MediumSlateBlue: "234137870477637",
+  BrightPurple: "234137870477637",
+  DeepSkyBlue: "2442142322678320",
+  AquaBlue: "2442142322678320",
+  BrilliantRose: "169463077092846",
+  HotPink: "169463077092846",
+  Aqua: "417639218648241",
+  Mango: "930060997172551",
+  Berry: "164535220883264",
+  Citrus: "370940413392601",
+  Candy: "205488546921017",
 } as const;
+
+/** Public shape of the color registry exposed to consumers. */
+export interface ThreadColorEntry {
+  readonly name: string;
+  readonly themeId: string;
+}
+
+/** Frozen registry of the verifiably-supported thread colors (no network needed). */
+export const THREAD_COLOR_REGISTRY: readonly ThreadColorEntry[] = Object.freeze(
+  Object.entries(THREAD_COLORS).map(([name, themeId]) => Object.freeze({ name, themeId }) as ThreadColorEntry),
+);
 
 /** Reaction emoji shortcuts accepted by `addReaction`. */
 export const REACTION_EMOJI = {
