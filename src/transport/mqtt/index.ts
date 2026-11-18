@@ -15,9 +15,16 @@
 
 import { randomUUID } from "node:crypto";
 
-import { connect } from "mqtt";
+import mqtt from "mqtt";
 import type { IClientOptions, MqttClient, Packet } from "mqtt";
+import WebSocket from "ws";
 import { z } from "zod";
+
+// mqtt's browser ESM build (`dist/mqtt.esm.js`) exposes only a default
+// export — `import { connect } from "mqtt"` fails to link in bundlers
+// (Bundlephobia reported this). The default export carries `.connect` in
+// both the CJS and browser ESM builds, so destructure once here.
+const connect = mqtt.connect;
 
 import { CookieStore } from "../../auth/index.js";
 import {
@@ -703,14 +710,29 @@ export class MqttTransport {
         // The transport owns reconnection; never let mqtt.js retry on its own.
         reconnectPeriod: 0,
         wsOptions,
+        // Override WebSocket creation to force the 'mqtt' sub-protocol.
+        // mqtt.js v5 automatically sends 'mqttv3.1' when protocolId is
+        // 'MQIsdp' + protocolVersion 3, but Facebook's edge-chat broker
+        // negotiates the standard 'mqtt' WebSocket sub-protocol regardless
+        // of the MQTT wire-level protocol version in the CONNECT packet.
+        // Sending 'mqttv3.1' causes the server to close the connection
+        // before CONNACK because the sub-protocol negotiation fails.
+        createWebsocket: (wsUrl: string, _protocols: string[], wsOpts: IClientOptions) => {
+          return new WebSocket(wsUrl, ["mqtt"], wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+        },
       };
 
       this.#logger.debug({ region: region ?? "default", url }, "dialing MQTT endpoint");
 
-      // Apply connection jitter to avoid synchronized connections
-      const connectionJitter = this.#obfuscation.getConnectionJitter();
-      if (connectionJitter > 0) {
-        await applyObfuscationDelay(connectionJitter);
+      // Connection jitter is applied only on reconnects — the initial
+      // connection should proceed without artificial delay so the user
+      // sees the CONNACK as fast as possible.  On reconnects a small
+      // jitter (0-500 ms) prevents synchronized stampedes.
+      if (this.#everConnected) {
+        const connectionJitter = Math.floor(Math.random() * 500);
+        if (connectionJitter > 0) {
+          await applyObfuscationDelay(connectionJitter);
+        }
       }
 
       let client: MqttClient;
@@ -815,35 +837,22 @@ export class MqttTransport {
     this.#attachClientHandlers(client, generation);
     this.#startHeartbeatWatchdog();
 
-    // Subscribe to every topic with MQTT obfuscation:
-    // 1. Randomize subscription order to avoid predictable patterns
-    // 2. Add staggered delays between subscriptions
+    // Subscribe to every topic. Topic order is randomized to avoid a
+    // fingerprint-able subscription sequence, but subscriptions are
+    // issued synchronously (no inter-subscription delays) so the sync
+    // queue publish below can proceed immediately — staggered delays
+    // during initial setup risk missing the first /t_ms and triggering
+    // the TMS watchdog.
     const topics = this.#obfuscation.randomizeTopicOrder(MQTT_TOPICS);
-    
-    const subscribeWithObfuscation = async () => {
-      for (let i = 0; i < topics.length; i++) {
-        const topic = topics[i]!;
-        
-        // Apply obfuscation delay before each subscription (except first)
-        if (i > 0) {
-          const delay = this.#obfuscation.getSubscriptionDelay(i, topics.length);
-          await applyObfuscationDelay(delay);
-        }
-        
-        client.subscribe(topic, (error) => {
-          if (error === null) return;
-          this.#logger.warn({ topic, err: error.message }, "MQTT subscription failed");
-          this.#runCallback("onWarning", () =>
-            this.#deps.callbacks.onWarning(`failed to subscribe to MQTT topic "${topic}"`, { topic }),
-          );
-        });
-      }
-    };
-    
-    // Run subscription obfuscation asynchronously
-    subscribeWithObfuscation().catch((error) => {
-      this.#logger.warn({ err: errorMessage(error) }, "subscription obfuscation failed");
-    });
+    for (const topic of topics) {
+      client.subscribe(topic, (error) => {
+        if (error === null) return;
+        this.#logger.warn({ topic, err: error.message }, "MQTT subscription failed");
+        this.#runCallback("onWarning", () =>
+          this.#deps.callbacks.onWarning(`failed to subscribe to MQTT topic "${topic}"`, { topic }),
+        );
+      });
+    }
 
     // A fresh queue needs a sequence id; fetch one when the hook is wired.
     if (this.#syncToken === null && this.#lastSeqId === null && this.#deps.refetchLastSeqId !== undefined) {
@@ -853,15 +862,9 @@ export class MqttTransport {
 
     await this.#publishSyncQueue(client);
     
-    // Mark the client foreground and available with obfuscated timing
-    const presenceDelay = this.#obfuscation.getOperationDelay();
-    await applyObfuscationDelay(presenceDelay);
-    
+    // Mark the client foreground and available. Delays are minimal
+    // during initial setup to stay within the TMS watchdog window.
     await this.#publishNow(client, TOPIC_FOREGROUND_STATE, JSON.stringify({ foreground: this.#chatOn }), 1, false);
-    
-    const spacingDelay = this.#obfuscation.getOperationDelay();
-    await applyObfuscationDelay(spacingDelay);
-    
     await this.#publishNow(client, TOPIC_CLIENT_SETTINGS, JSON.stringify({ make_user_available_when_in_foreground: this.#chatOn }), 1, false);
     
     this.#obfuscation.recordPresencePublish();

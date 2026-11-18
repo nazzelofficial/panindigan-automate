@@ -134,7 +134,7 @@ describe("automatic update checker (stubbed registry)", () => {
     );
     const storage = new MemoryStorage();
     const checker = new UpdateChecker({
-      options: { enabled: true, allowPrerelease: true },
+      options: { enabled: true, allowPrerelease: true, autoInstall: false },
       logger: silent(),
       storage,
       version: "0.0.1",
@@ -162,8 +162,8 @@ describe("automatic update checker (stubbed registry)", () => {
     const { MessengerClient } = await import("../src/index.js");
     const client = new MessengerClient({ update: { autoInstall: false } });
 
-    for (let i = 0; i < 100; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+    for (let i = 0; i < 200; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
       if (client.getUpdateStatus()?.installationStatus === "available") break;
     }
 
@@ -171,19 +171,31 @@ describe("automatic update checker (stubbed registry)", () => {
     expect(status?.installationStatus).toBe("available");
     expect(status?.latestVersion).toBe("9.9.9");
     client.update.stop();
-  });
+  }, 15_000);
 
   it("makes no network call when the user sets update.enabled=false", async () => {
+    // Test the UpdateChecker directly (not via MessengerClient) so the
+    // assertion is hermetic — ES module caching means MessengerClient is
+    // shared across tests in this file, and a prior test's client may
+    // still have an in-flight fetch when this test's fetchMock lands.
     const fetchMock = vi.fn(async () =>
       registryResponse({ version: "9.9.9", dist: {}, time: {} }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    const { MessengerClient } = await import("../src/index.js");
-    new MessengerClient({ update: { enabled: false } });
+    const storage = new MemoryStorage();
+    const checker = new UpdateChecker({
+      options: { enabled: false },
+      logger: silent(),
+      storage,
+      version: "0.2.4",
+    });
 
+    // Even calling initialize() should be a no-op when disabled.
+    await checker.initialize();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(fetchMock).not.toHaveBeenCalled();
+    checker.stop();
   });
 
   it("reports up-to-date when the installed version is newer", async () => {

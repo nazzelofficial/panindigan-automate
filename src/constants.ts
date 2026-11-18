@@ -11,7 +11,7 @@
 export const LIBRARY_NAME = "panindigan-automate";
 
 /** Library version. Mirrors package.json. */
-export const VERSION = "0.2.3";
+export const VERSION = "0.2.4";
 
 /**
  * Default User-Agent: a reduced Chrome UA string. The major version is kept
@@ -245,7 +245,7 @@ export const STORAGE_KEYS = {
 export const TMS_TIMEOUT_MS = 5_000;
 
 /** MQTT CONNECT timeout; short so region fallback rotates quickly. */
-export const MQTT_CONNECT_TIMEOUT_MS = 5_000;
+export const MQTT_CONNECT_TIMEOUT_MS = 10_000;
 
 /** Default timeout for lightweight-service (`/ls_req`) responses. */
 export const LS_REQUEST_TIMEOUT_MS = 10_000;

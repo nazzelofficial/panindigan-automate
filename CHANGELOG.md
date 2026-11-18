@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.4] - 2026-11-18
+
+Patch release on top of the published 0.2.3. Targets the `MQTT connection closed before CONNACK` failures seen in deployments, plus setup latency. **The Facebook-side cause is not confirmed from this environment; live verification against the user's account is still required.**
+
+### Fixed
+
+- **MQTT WebSocket sub-protocol no longer uses mqtt.js's `mqttv3.1` default.** Verified from the installed `mqtt` package source: with `protocolId: "MQIsdp"` and `protocolVersion: 3`, mqtt.js v5 sends `mqttv3.1` in `Sec-WebSocket-Protocol`. Facebook's edge-chat broker is assumed to accept the standard `mqtt` sub-protocol; whether this is the actual reason for the pre-CONNACK closes has **not** been verified against live Facebook. The transport supplies a `createWebsocket` callback forcing `["mqtt"]` while leaving the `MQIsdp`/3 CONNECT packet untouched. If the deployment still fails with the same error after this release, the assumption was wrong and the override should be revisited.
+- **Excessive connection jitter removed from the initial dial.** The obfuscation layer added 0–5000 ms of random delay *before each dial attempt*, meaning 8 region candidates could burn up to 40 s in pure jitter before the first real connection was attempted. Jitter is now applied only on reconnects (0–500 ms), not on the initial connection.
+- **Subscription stagger delays removed from post-CONNACK setup.** Topic subscriptions were issued asynchronously with 10–50 ms delays between each of the 19 topics — the total latency (up to ~1 s) ate into the 5 s TMS watchdog and risked missing the first `/t_ms`. Subscriptions are now issued synchronously (no inter-subscription delays); topic order is still randomized.
+- **Presence publish delays removed from post-CONNACK setup.** Two obfuscation delays (100–300 ms each) were inserted between the foreground-state and client-settings publishes during setup, further delaying the sync queue and making the TMS watchdog more likely to fire. These delays are now skipped during initial setup; obfuscation delays remain active during runtime `setChatOn()` calls.
+
+### Changed
+
+- **`import { connect } from "mqtt"` replaced with a default import** (`const connect = mqtt.connect`). mqtt v5's browser ESM build exports only `default`, so bundlers (Bundlephobia, webpack, esbuild browser targets) failed with `ESModulesLinkingError: export 'connect' was not found in 'mqtt'`. The default export carries `.connect` in both Node and browser builds; Node behavior is unchanged (verified in consumer smoke tests).
+- `MQTT_CONNECT_TIMEOUT_MS` raised from 5 s to 10 s, matching the actively-maintained FCA reference's CONNECT timeout.
+
+### Tests
+
+- Added `tests/mqtt-ws-subprotocol.test.ts`: a regression guard documenting the intended sub-protocol override. These tests simulate mqtt.js's documented branch and our override; they do **not** exercise a real WebSocket against Facebook. Treat them as intent documentation, not proof that the broker accepts the header.
+- `tests/update.test.ts`: the "checks the registry on client construction" test timeout raised to 15 s to prevent flaky failures on slow CI; the "makes no network call when disabled" test rewritten to use `UpdateChecker` directly instead of `MessengerClient` to avoid ES module caching interference between tests.
+
+### Notes
+
+- The MQTT fix is a client-side protocol-negotiation correction. If the account is suspended, flagged, or the IP is blocked by Facebook, the connection will still fail — but with a proper error from the server instead of the silent pre-CONNACK close. Fresh cookies from an actively logged-in browser remain necessary.
+- The obfuscation layer is still active for runtime operations (publish spacing, presence jitter, topic order randomization). Only the initial-setup delays were removed because they interfered with the connection lifecycle.
+
 ## [0.2.3] - 2026-11-18
 
 Patch release on top of the published 0.2.2. MQTT region extraction robustness fixes and visibility into why Facebook refuses the socket.
