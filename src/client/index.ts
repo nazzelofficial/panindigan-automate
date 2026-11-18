@@ -347,7 +347,7 @@ export interface HomePageDiagnostics {
   readonly lsdPresent: boolean;
   /** True when the page carries a login form marker. */
   readonly hasLoginForm: boolean;
-  /** True when the page carries a checkpoint marker. */
+  /** True when the URL is on Facebook's checkpoint/two-step-verification path. */
   readonly hasCheckpoint: boolean;
 }
 
@@ -385,7 +385,13 @@ export function safeHomeDiagnostics(
       /id="loginform"/i.test(html) ||
       /id="login_form"/i.test(html) ||
       /id="loginForm"/i.test(html),
-    hasCheckpoint: /checkpoint|two_step_verification/i.test(html),
+    // URL-based only: a bare body substring like "checkpoint" appears in every
+    // React app-shell page (including logged-in ones) and says nothing about
+    // whether a checkpoint interstitial is actually being served.
+    // A checkpoint interstitial is served at a /checkpoint or
+    // /two_step_verification path — that is what we check. A page that *lists*
+    // checkpoint modules inline without a checkpoint URL is not a checkpoint.
+    hasCheckpoint: /\/checkpoint|\/two_step_verification/i.test(url),
   };
 }
 

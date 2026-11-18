@@ -7,7 +7,7 @@
  * `www.facebook.com` — the exact path the login flow uses.
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { CookieError } from "../src/errors/index.js";
 import { CookieStore } from "../src/auth/index.js";
 
@@ -70,6 +70,34 @@ describe("CookieStore", () => {
   it("exposes the user id via getUserId()", () => {
     const store = CookieStore.fromCookies(APP_STATE_COOKIES);
     expect(store.getUserId()).toBe("100000000000001");
+  });
+
+  it("names the silently rejected cookie instead of just counting them", () => {
+    const rejected = [
+      ...APP_STATE_COOKIES,
+      {
+        // __Host- cookies must be Secure with Path=/ and NO Domain attribute;
+        // this export carries a Domain, so tough-cookie rejects it silently.
+        name: "__Host-bad-export",
+        value: "value",
+        domain: ".facebook.com",
+        path: "/",
+        expiresAtMs: NOW + 30 * DAY_MS,
+        hostOnly: false,
+        httpOnly: false,
+        secure: true,
+        sameSite: undefined,
+      },
+    ];
+    const warnings: string[] = [];
+    const spy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    });
+
+    CookieStore.fromCookies(rejected);
+
+    spy.mockRestore();
+    expect(warnings.join("\n")).toContain("__Host-bad-export");
   });
 
   it("emits every AppState cookie as a Cookie header for www.facebook.com", () => {

@@ -2,6 +2,42 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-11-18
+
+Patch release on top of the published 0.2.1. Fixes a false-positive login rejection triggered by substring matching against the whole app shell.
+
+### Fixed
+
+- **Login no longer aborts with "Facebook requires a security checkpoint" on ordinary logged-in pages.** The `hasCheckpoint` diagnostic matched `/checkpoint|two_step_verification/i` anywhere in the response body. Every Facebook app-shell page carries the substring "checkpoint" in its inlined JavaScript, so `hasCheckpoint=true` fired on normal logged-in pages (seen in production: `status=200 path=/ bytes=4295078 fbDtsg=true lsd=true checkpoint=true` — an app shell serving a valid boot payload, stopped before the session could even be tried). `hasCheckpoint` is now computed from the URL path only (`/checkpoint` or `/two_step_verification`).
+- The `isLoginPage` gate no longer treats a body substring as evidence of a checkpoint interstitial; a checkpoint path or a literal login-form marker is required instead. A session flagged for review is caught by Facebook's own API signals — `/chat/user_info/` structured errors and the MQTT checkpoint signals enforced by the Stealth Guard's A9 realtime checkpoint guard — not by a substring guess.
+
+### Notes
+
+- **This does not un-restrict a flagged account.** If Facebook serves the app shell (200, path=/, valid tokens) and then rejects at the API layer, that verdict arrives through the API — not through page content. If a confirmed-fresh export still fails, the account is restricted; appeal or use another account.
+- The deployment that produced the "security checkpoint" error above was running 0.2.0 (`node_modules/.pnpm/panindigan-automate@0.2.0/`).
+
+### Tests
+
+- `tests/scrape-tokens.test.ts`: the local diagnose shim now computes `hasCheckpoint` from the URL, matching production semantics.
+
+## [0.2.1] - 2026-11-18
+
+Patch release on top of the published 0.2.0. Cookie-load diagnostics: the "cookies silently rejected" warning now says exactly which cookie was skipped, instead of a nameless count.
+
+### Fixed
+
+- **CookieStore.setCookies() now names the silently rejected cookies.** Previously the warning reported only `N of M cookies were silently rejected by tough-cookie`, which gave no way to tell which cookie was skipped — the deployment could not be diagnosed from the log alone. The warning now lists the exact names (e.g. `__Host-FGP-…`) and explains that `__Secure-`/`__Host-` cookies need Secure (+ `Path=/` and no `Domain` for `__Host-`) attributes in the export, and that the required `c_user`/`xs`/`datr` are not implicated (they passed validation).
+- **Fixed a miscount in the same detection.** Cookies scoped to `messenger.com` were counted as "rejected" even though they landed in the jar on the messenger domain; rejection is now detected per-cookie by name against the jar for that cookie's own URL.
+
+### Tests
+
+- Regression test: `CookieStore.fromCookies` names the rejected cookie when a `__Host-` export carries a `Domain` attribute (which is invalid for that prefix and causes silent rejection).
+
+### Notes
+
+- The silent rejection is tough-cookie's documented RFC 6265 prefix-security behavior (`__Secure-` requires `Secure`; `__Host-` additionally requires `Path=/` and no `Domain` attribute), not a new restriction.
+- **The login `Redirect limit (5) exceeded` failure is not caused by this warning.** It is Facebook's server-side rejection of the session — the 0.1.8 line answered that rejection with a 249-byte `1357004` envelope; 0.2.0's root-page GET gets a redirect chain instead. The rejected cookie in that log was never load-bearing (validation requires and passes `c_user`/`xs`/`datr`). Re-export cookies from an actively logged-in browser; if a confirmed-fresh export fails the same way, the account is restricted and no code will fix it.
+
 ## [0.2.0] - 2026-11-18
 
 ### Changed

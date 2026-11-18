@@ -346,6 +346,7 @@ export async function parseCredentials(input: Credentials): Promise<readonly Nor
   return parseStructured(input, "credential input");
 }
 
+
 /** Maps a cookie domain to the URL it is stored under. */
 function urlForCookie(cookie: NormalizedCookie): string {
   if (cookie.hostOnly && cookie.domain !== FB_COOKIE_DOMAIN) {
@@ -397,9 +398,9 @@ export class CookieStore {
 
   /** Stores normalized cookies, replacing same-named entries. */
   setCookies(cookies: readonly NormalizedCookie[]): void {
-    const beforeCount = this.#jar.getCookiesSync(FACEBOOK_URL).length;
-    const inputCount = cookies.length;
-    
+    const landed = (cookie: NormalizedCookie): boolean =>
+      this.#jar.getCookiesSync(urlForCookie(cookie)).some((stored) => stored.key === cookie.name);
+
     for (const cookie of cookies) {
       const toughCookie = toToughCookie(cookie);
       const url = urlForCookie(cookie);
@@ -413,18 +414,16 @@ export class CookieStore {
         );
       }
     }
-    
-    const afterCount = this.#jar.getCookiesSync(FACEBOOK_URL).length;
-    const inserted = afterCount - beforeCount;
-    
-    // Detect silent rejections (tough-cookie prefixSecurity:'silent' behavior)
-    // Cookies with __Secure-/__Host- prefixes may be silently skipped
-    if (inserted < inputCount) {
-      const rejected = inputCount - inserted;
+
+    // Silent rejections (tough-cookie prefixSecurity:'silent' behavior) are reported per name,
+    // so the operator can see exactly which cookie was skipped.
+    const missing = cookies.filter((cookie) => !landed(cookie));
+    if (missing.length > 0) {
+      const names = missing.map((cookie) => cookie.name).join(", ");
       console.warn(
-        `[panindigan-automate] ${rejected} of ${inputCount} cookies were silently rejected by tough-cookie. ` +
-        `This usually means __Secure-/__Host- prefixed cookies lack required attributes (Secure, Path, Domain). ` +
-        `If authentication fails, export fresh cookies from an actively logged-in browser session.`
+        `[panindigan-automate] ${missing.length} of ${cookies.length} cookies were silently rejected by tough-cookie: ${names}. ` +
+        `Cookies with __Secure-/__Host- prefixes need Secure (+ Path=/ and no Domain for __Host-) attributes in the export. ` +
+        `The required c_user/xs/datr are not among the rejects (they passed validation); export fresh cookies from an actively logged-in browser.`
       );
     }
   }

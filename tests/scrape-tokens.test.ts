@@ -193,18 +193,18 @@ describe("extractLsd", () => {
 // ── diagnoseScrapeFailure equivalents ─────────────────────────────────────
 
 describe("scrape failure diagnostics", () => {
-  function diagnose(html: string) {
+  function diagnose(html: string, url: string) {
     return {
       fbDtsgFound: extractFbDtsgShim(html) !== undefined,
       lsdFound: extractLsdShim(html) !== undefined,
       hasLoginForm: html.includes('id="loginform"'),
-      hasCheckpoint: /checkpoint|two_step_verification/i.test(html),
+      hasCheckpoint: /\/checkpoint|\/two_step_verification/i.test(url),
       bodyLength: html.length,
     };
   }
 
   it("reports both tokens missing on login page", () => {
-    const d = diagnose(LOGIN_PAGE_HTML);
+    const d = diagnose(LOGIN_PAGE_HTML, "https://www.facebook.com/");
     expect(d.fbDtsgFound).toBe(false);
     expect(d.lsdFound).toBe(false);
     expect(d.hasLoginForm).toBe(true);
@@ -212,14 +212,14 @@ describe("scrape failure diagnostics", () => {
   });
 
   it("reports checkpoint flag on checkpoint page", () => {
-    const d = diagnose(CHECKPOINT_HTML);
+    const d = diagnose(CHECKPOINT_HTML, "https://www.facebook.com/checkpoint/block/");
     expect(d.fbDtsgFound).toBe(false);
     expect(d.lsdFound).toBe(false);
     expect(d.hasCheckpoint).toBe(true);
   });
 
   it("reports both tokens found on modern SPA page", () => {
-    const d = diagnose(MODERN_SPA_HTML);
+    const d = diagnose(MODERN_SPA_HTML, "https://www.facebook.com/");
     expect(d.fbDtsgFound).toBe(true);
     expect(d.lsdFound).toBe(true);
     expect(d.hasLoginForm).toBe(false);
@@ -227,7 +227,7 @@ describe("scrape failure diagnostics", () => {
   });
 
   it("includes body length in diagnostic", () => {
-    const d = diagnose(EMPTY_HTML);
+    const d = diagnose(EMPTY_HTML, "https://www.facebook.com/");
     expect(d.bodyLength).toBe(EMPTY_HTML.length);
   });
 });
