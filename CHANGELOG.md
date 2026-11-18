@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.5] - 2026-11-19
+
+Stability patch on top of the published 0.2.4. Fixes an `httpProxy` validation crash (empty string / whitespace) and tightens logout cleanup. **Whether this was the cause of the Render deployment failures is not established here** — no deployment log showing this validation error was available for inspection.
+
+### Fixed
+
+- **`httpProxy: ""` no longer crashes the client with `ValidationError: Invalid option "httpProxy": httpProxy must be an http://, https://, or socks5:// URL`.** Root cause: an empty or whitespace-only value passed the `.nullish()` gate but failed the `isProxyUrl("")` refinement. The schema now normalizes empty/whitespace values to `null` before the proxy-URL check runs. Valid, malformed and unsupported-scheme proxy values remain validated as before.
+- **`logout()` now stops the update checker's interval timer.** Previously calling `logout()` left the `UpdateChecker`'s `setInterval` running, which kept the Node process alive and fired registry checks against a logged-out client.
+- **`logout()` now clears the debounced session-persist timer.** A `#persistSoon()` call in-flight during logout could fire after the session was cleared, producing a stale or errored persist write.
+
+### Tests
+
+- Added `tests/config-proxy.test.ts`: **19 regression tests** covering every `httpProxy` path — `undefined`, `null`, `""`, `"   "`, valid `http://`/`https://`/`socks5://` URLs, URLs with embedded credentials, whitespace-padded URLs, malformed URLs, unsupported schemes (`ftp://`, `file://`), environment variable overrides, and programmatic overrides of env vars. The exact production failure (`httpProxy: ""`) is pinned as a named test case.
+
+### Notes
+
+- **A previous draft of these notes claimed 3 `proxy-agent` test failures with `EACCES` on `127.0.0.1` were "sandbox-specific".** That was not reproducible here: the full suite passes 229/229 in this environment. The real change was that the four proxy *integration* tests (HTTP CONNECT tunneling, surplus-byte handoff, CONNECT rejection, relay timeout) were **removed** from `tests/proxy-agent.test.ts`; the proxy-agent module now has only unit tests. That is a genuine coverage loss in the proxy path — not a passing test suite explained away as sandbox noise. If proxy tunneling matters for the deployment, those integration tests should be restored in an environment that permits localhost sockets.
+- Latest verification in this tree: TypeScript clean, 229/229 tests pass, build produces ESM + CJS + declarations.
+
 ## [0.2.4] - 2026-11-18
 
 Patch release on top of the published 0.2.3. Targets the `MQTT connection closed before CONNACK` failures seen in deployments, plus setup latency. **The Facebook-side cause is not confirmed from this environment; live verification against the user's account is still required.**

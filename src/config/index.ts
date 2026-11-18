@@ -70,6 +70,13 @@ const DEFAULTS = {
  * Schema for the scalar, serializable options. Non-serializable fields
  * (`logTransports`, `storageAdapter` instances, `plugins`) are validated
  * structurally instead — see `validateNonScalarOptions`.
+ *
+ * `httpProxy` uses `.transform()` so empty strings and whitespace-only
+ * values are normalized to `null` before the proxy-URL check runs.
+ * Without this, an empty `PANINDIGAN_HTTP_PROXY=""` environment variable
+ * or an explicit `httpProxy: ""` in `ClientOptions` would pass the
+ * `.nullish()` gate but fail the `isProxyUrl` refinement with the
+ * confusing "httpProxy must be an http://…" error.
  */
 const clientOptionsSchema = z
   .object({
@@ -80,7 +87,14 @@ const clientOptionsSchema = z
     httpTimeout: z.number().int().min(1_000).optional(),
     httpRetries: z.number().int().min(0).max(10).optional(),
     httpMaxRedirects: z.number().int().min(0).max(20).optional(),
-    httpProxy: z.string().min(1).nullish(),
+    httpProxy: z
+      .string()
+      .nullish()
+      .transform((value) => {
+        if (value === undefined || value === null) return value;
+        const trimmed = value.trim();
+        return trimmed === "" ? null : trimmed;
+      }),
     userAgent: z.string().min(16).optional(),
     heartbeatInterval: z.number().int().min(5).max(600).optional(),
     heartbeatTimeout: z.number().int().min(1).max(120).optional(),

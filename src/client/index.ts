@@ -1203,6 +1203,20 @@ export class MessengerClient {
     this.#idempotency.stop();
     this.#antiDetect.destroy();
 
+    // Stop the update checker's periodic interval timer so it does not
+    // keep the process alive or fire registry checks after logout.
+    if (this.#updateChecker !== null) {
+      this.#updateChecker.stop();
+    }
+
+    // Clear the debounced persist timer — the session is about to be
+    // cleared anyway, so a stale persist firing after logout would be a
+    // no-op at best and an error at worst.
+    if (this.#persistTimer !== null) {
+      clearTimeout(this.#persistTimer);
+      this.#persistTimer = null;
+    }
+
     if (state !== "UNINITIALIZED" && state !== "CLOSED") {
       this.#session.markClosed();
     }
