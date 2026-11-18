@@ -106,21 +106,53 @@ function formatDuration(ms: number): string {
 
 /**
  * Console Logger — implements a compatible subset of `pino.Logger`.
+ *
+ * Notes for callers:
+ * - `child({ module: "name" })` returns a new child with the module suffix —
+ *   the module name is included in output (e.g. `panindigan-automate:session`).
+ * - No secret redaction is applied here, ever. Use the default pino logger
+ *   for production and aggregators.
  */
+const LEVEL_VALUES: Record<LogLevel, number> = {
+  silent: Number.POSITIVE_INFINITY,
+  fatal: 60,
+  error: 50,
+  warn: 40,
+  info: 30,
+  success: 35,
+  debug: 20,
+  verbose: 15,
+  trace: 10,
+};
+
 class ConsoleLogger {
   private readonly _level: LogLevel;
   private readonly name: string;
-  level: string = "info";
-  levelVal: number = 30;
+  level: string;
+  levelVal: number;
   readonly levels = {
-    values: { silent: Infinity, fatal: 60, error: 50, warn: 40, info: 30, debug: 20, trace: 10 },
-    labels: { 10: "trace", 20: "debug", 30: "info", 40: "warn", 50: "error", 60: "fatal" },
+    values: LEVEL_VALUES,
+    labels: {
+      10: "trace",
+      15: "verbose",
+      20: "debug",
+      30: "info",
+      35: "success",
+      40: "warn",
+      50: "error",
+      60: "fatal",
+    },
   } as const;
+
+  private can(level: LogLevel): boolean {
+    return LEVEL_VALUES[level] >= LEVEL_VALUES[this._level];
+  }
 
   constructor(name: string, level: LogLevel = "info") {
     this.name = name;
     this._level = level;
     this.level = level;
+    this.levelVal = LEVEL_VALUES[level] ?? LEVEL_VALUES.info;
   }
 
   startupBanner(version: string): void {
@@ -196,48 +228,63 @@ class ConsoleLogger {
   }
 
   silent(): void {}
-  fatal(msg: string | Record<string, unknown>, message?: string): void { this.error(msg, message); }
+  fatal(msg: string | Record<string, unknown>, message?: string): void {
+    if (!this.can("fatal")) return;
+    const txt = typeof msg === "string" ? msg : (message ?? "Fatal");
+    console.log(`${colors.gray}[${timestamp()}]${colors.reset} ${colors.error}${icons.error} FATAL${colors.reset}   ${colors.bold}${txt}${colors.reset}`);
+    if (typeof msg === "object") console.log(`${colors.dim}${JSON.stringify(msg, null, 2)}${colors.reset}`);
+  }
 
   error(msg: string | Record<string, unknown>, message?: string): void {
+    if (!this.can("error")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Error");
     console.log(`${colors.gray}[${timestamp()}]${colors.reset} ${colors.error}${icons.error} ERROR${colors.reset}   ${colors.bold}${txt}${colors.reset}`);
     if (typeof msg === "object") console.log(`${colors.dim}${JSON.stringify(msg, null, 2)}${colors.reset}`);
   }
 
   warn(msg: string | Record<string, unknown>, message?: string): void {
+    if (!this.can("warn")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Warning");
     console.log(`${colors.gray}[${timestamp()}]${colors.reset} ${colors.warning}${icons.warn} WARN${colors.reset}    ${colors.bold}${txt}${colors.reset}`);
   }
 
   info(msg: string | Record<string, unknown>, message?: string): void {
+    if (!this.can("info")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Info");
     console.log(`${colors.gray}[${timestamp()}]${colors.reset} ${colors.info}${icons.info} INFO${colors.reset}    ${txt}`);
   }
 
   success(msg: string | Record<string, unknown>, message?: string): void {
+    if (!this.can("success")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Success");
     console.log(`${colors.gray}[${timestamp()}]${colors.reset} ${colors.success}${icons.success} SUCCESS${colors.reset} ${colors.bold}${txt}${colors.reset}`);
   }
 
   debug(msg: string | Record<string, unknown>, message?: string): void {
-    if (this._level !== "debug" && this._level !== "trace") return;
+    if (!this.can("debug")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Debug");
     console.log(`${colors.darkGray}[${timestamp()}] ${icons.dot} DEBUG   ${txt}${colors.reset}`);
   }
 
   verbose(msg: string | Record<string, unknown>, message?: string): void {
-    if (this._level !== "verbose" && this._level !== "debug" && this._level !== "trace") return;
+    if (!this.can("verbose")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Verbose");
     console.log(`${colors.gray}[${timestamp()}] ${icons.arrow} VERBOSE ${txt}${colors.reset}`);
   }
 
   trace(msg: string | Record<string, unknown>, message?: string): void {
-    if (this._level !== "trace") return;
+    if (!this.can("trace")) return;
     const txt = typeof msg === "string" ? msg : (message ?? "Trace");
     console.log(`${colors.dim}[${timestamp()}] » TRACE   ${txt}${colors.reset}`);
   }
 
-  child(): ConsoleLogger { return this; }
+  child(bindings?: Record<string, unknown>): ConsoleLogger {
+    const module = typeof bindings?.["module"] === "string" ? bindings["module"] : undefined;
+    const plugin = typeof bindings?.["plugin"] === "string" ? bindings["plugin"] : undefined;
+    const suffix = module ?? plugin;
+    return new ConsoleLogger(suffix ? `${this.name}:${suffix}` : this.name, this._level);
+  }
+
   flush(): void {}
 }
 

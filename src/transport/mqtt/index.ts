@@ -48,6 +48,12 @@ import type { ResolvedConfig } from "../../config/index.js";
 import type { Logger } from "../../logger/index.js";
 import { generateOfflineThreadingId } from "../../utils/index.js";
 import { createWsProxyAgent } from "./proxy-agent.js";
+import {
+  MqttObfuscationManager,
+  PublishRateTracker,
+  applyObfuscationDelay,
+  type MqttObfuscationConfig,
+} from "./obfuscation.js";
 
 // ---------------------------------------------------------------------------
 // Wire schemas
@@ -243,6 +249,8 @@ export class MqttTransport {
   readonly #deps: MqttTransportDeps;
   readonly #logger: Logger;
   readonly #cid: string;
+  readonly #obfuscation: MqttObfuscationManager;
+  readonly #publishRateTracker: PublishRateTracker;
 
   #closed = false;
   #cycleRunning = false;
@@ -279,6 +287,12 @@ export class MqttTransport {
     this.#deps = deps;
     this.#logger = deps.logger.child({ module: "mqtt" });
     this.#cid = randomUUID();
+    this.#obfuscation = new MqttObfuscationManager({
+      enabled: true,
+      randomizeSubscriptionOrder: true,
+      varyPresencePattern: true,
+    });
+    this.#publishRateTracker = new PublishRateTracker();
     this.#preferredRegion = deps.region ?? null;
     this.#chatOn = deps.chatOn;
     if (deps.initialCursor !== undefined) {
@@ -397,6 +411,7 @@ export class MqttTransport {
    * Publishes a message. While disconnected the packet is held in the FIFO
    * offline queue (bounded by `mqttQueueMaxSize`) and flushed on the next
    * connection; a full queue throws `MQTT_QUEUE_OVERFLOW`.
+   * Applies publish rate tracking and spacing obfuscation.
    */
   async publish(topic: string, payload: string, options: PublishOptions = {}): Promise<void> {
     const qos = options.qos ?? 1;
@@ -425,6 +440,16 @@ export class MqttTransport {
       this.#deps.diagnostics.setQueueDepth(this.#queue.length);
       return;
     }
+    
+    // Apply publish spacing obfuscation to avoid burst patterns
+    this.#publishRateTracker.recordPublish();
+    const recentCount = this.#publishRateTracker.getRecentCount();
+    const spacingDelay = this.#obfuscation.getPublishSpacingDelay(recentCount);
+    
+    if (spacingDelay > 0) {
+      await applyObfuscationDelay(spacingDelay);
+    }
+    
     await this.#publishNow(client, topic, payload, qos, retain, MQTT_CONNECT_TIMEOUT_MS);
   }
 
@@ -506,13 +531,31 @@ export class MqttTransport {
   /**
    * Updates the availability flag, republishing the foreground and
    * client-settings state on the live connection when there is one.
+   * Applies presence pattern variation to avoid predictable timing.
    */
   async setChatOn(chatOn: boolean): Promise<void> {
     this.#chatOn = chatOn;
     const client = this.#client;
     if (client === null) return;
+    
+    // Apply presence obfuscation: vary timing to avoid predictable patterns
+    if (!this.#obfuscation.shouldPublishPresence()) {
+      this.#logger.debug("skipping presence publish for pattern variation");
+      return;
+    }
+    
+    const delay = this.#obfuscation.getOperationDelay();
+    await applyObfuscationDelay(delay);
+    
     await this.#publishNow(client, TOPIC_FOREGROUND_STATE, JSON.stringify({ foreground: chatOn }), 1, false);
+    
+    // Add spacing between presence publishes
+    const spacingDelay = this.#obfuscation.getOperationDelay();
+    await applyObfuscationDelay(spacingDelay);
+    
     await this.#publishNow(client, TOPIC_CLIENT_SETTINGS, JSON.stringify({ make_user_available_when_in_foreground: chatOn }), 1, false);
+    
+    this.#obfuscation.recordPresencePublish();
   }
 
   // -------------------------------------------------------------------------
@@ -599,7 +642,7 @@ export class MqttTransport {
    * rejects on failure so the sweep can continue.
    */
   #dial(region: string | null): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
+    return new Promise<void>(async (resolve, reject) => {
       const generation = ++this.#generation;
       const sessionId = Math.floor(Math.random() * MAX_SESSION_ID) + 1;
       const url = this.#buildUrl(region, sessionId);
@@ -662,6 +705,12 @@ export class MqttTransport {
       };
 
       this.#logger.debug({ region: region ?? "default", url }, "dialing MQTT endpoint");
+
+      // Apply connection jitter to avoid synchronized connections
+      const connectionJitter = this.#obfuscation.getConnectionJitter();
+      if (connectionJitter > 0) {
+        await applyObfuscationDelay(connectionJitter);
+      }
 
       let client: MqttClient;
       try {
@@ -765,17 +814,35 @@ export class MqttTransport {
     this.#attachClientHandlers(client, generation);
     this.#startHeartbeatWatchdog();
 
-    // Subscribe to every topic, one SUBSCRIBE per topic like the reference
-    // clients do.
-    for (const topic of MQTT_TOPICS) {
-      client.subscribe(topic, (error) => {
-        if (error === null) return;
-        this.#logger.warn({ topic, err: error.message }, "MQTT subscription failed");
-        this.#runCallback("onWarning", () =>
-          this.#deps.callbacks.onWarning(`failed to subscribe to MQTT topic "${topic}"`, { topic }),
-        );
-      });
-    }
+    // Subscribe to every topic with MQTT obfuscation:
+    // 1. Randomize subscription order to avoid predictable patterns
+    // 2. Add staggered delays between subscriptions
+    const topics = this.#obfuscation.randomizeTopicOrder(MQTT_TOPICS);
+    
+    const subscribeWithObfuscation = async () => {
+      for (let i = 0; i < topics.length; i++) {
+        const topic = topics[i]!;
+        
+        // Apply obfuscation delay before each subscription (except first)
+        if (i > 0) {
+          const delay = this.#obfuscation.getSubscriptionDelay(i, topics.length);
+          await applyObfuscationDelay(delay);
+        }
+        
+        client.subscribe(topic, (error) => {
+          if (error === null) return;
+          this.#logger.warn({ topic, err: error.message }, "MQTT subscription failed");
+          this.#runCallback("onWarning", () =>
+            this.#deps.callbacks.onWarning(`failed to subscribe to MQTT topic "${topic}"`, { topic }),
+          );
+        });
+      }
+    };
+    
+    // Run subscription obfuscation asynchronously
+    subscribeWithObfuscation().catch((error) => {
+      this.#logger.warn({ err: errorMessage(error) }, "subscription obfuscation failed");
+    });
 
     // A fresh queue needs a sequence id; fetch one when the hook is wired.
     if (this.#syncToken === null && this.#lastSeqId === null && this.#deps.refetchLastSeqId !== undefined) {
@@ -784,9 +851,19 @@ export class MqttTransport {
     if (this.#client !== client) return; // the connection cycled mid-fetch
 
     await this.#publishSyncQueue(client);
-    // Mark the client foreground and available, matching the web client.
+    
+    // Mark the client foreground and available with obfuscated timing
+    const presenceDelay = this.#obfuscation.getOperationDelay();
+    await applyObfuscationDelay(presenceDelay);
+    
     await this.#publishNow(client, TOPIC_FOREGROUND_STATE, JSON.stringify({ foreground: this.#chatOn }), 1, false);
+    
+    const spacingDelay = this.#obfuscation.getOperationDelay();
+    await applyObfuscationDelay(spacingDelay);
+    
     await this.#publishNow(client, TOPIC_CLIENT_SETTINGS, JSON.stringify({ make_user_available_when_in_foreground: this.#chatOn }), 1, false);
+    
+    this.#obfuscation.recordPresencePublish();
 
     this.#drainedThisConnection = await this.#drainQueue(client);
 

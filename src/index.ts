@@ -49,6 +49,10 @@ export { MiddlewareManager } from "./middleware/index.js";
 export type { MiddlewareSource } from "./middleware/index.js";
 export { PluginManager } from "./plugins/index.js";
 export type { PluginState, PluginView } from "./plugins/index.js";
+
+// Logger — pino JSON by default; opt-in console logger (LogTransport re-exported via types)
+export { createRootLogger } from "./logger/index.js";
+export type { Logger, LogLevel, LoggerOptions } from "./logger/index.js";
 export { TypedEmitter } from "./events/index.js";
 export { DiagnosticsCollector } from "./diagnostics/index.js";
 export { SyncEndpoint } from "./sync/index.js";
@@ -81,6 +85,33 @@ export type { WatchdogConfig, WatchdogCallbacks } from "./stealth/watchdog.js";
 export { SlidingWindowCap, TokenBucket } from "./stealth/rate-limiter.js";
 export type { OperationLimits, RateLimitConfig, WindowState, CapLevel } from "./stealth/rate-limiter.js";
 
+// Anti-Detection Protection (NEW in v0.2.0)
+export {
+  AntiDetectionManager,
+  DEFAULT_ANTI_DETECTION_CONFIG,
+  generateHardwareDeviceId,
+  generateUserAgent,
+  generateClientHints,
+  applyTimingJitter,
+  humanLikeDelay,
+  calculateAdaptiveDelay,
+} from "./stealth/index.js";
+export type { AntiDetectionConfig, DeviceFingerprint } from "./stealth/index.js";
+
+// Update checker — automatic and on by default since 0.2.0 (backup + rollback; restart required);
+// opt out with `update: { enabled: false }` or `autoInstall: false`.
+export { UpdateChecker, isOlder, DEFAULT_UPDATE_CONFIG } from "./update/index.js";
+export type {
+  UpdateCheckerOptions,
+  UpdateInfo,
+  UpdateCheckResult,
+  UpdateHistory,
+  UpdateStatus,
+  InstallationStatus,
+  PackageManager,
+  PackageManagerInfo,
+} from "./update/index.js";
+
 // E2EE — 1:1 Messenger E2EE (faithful port of bhhoang/fbapi-unofficial, MIT)
 export {
   E2EEClient,
@@ -100,9 +131,7 @@ export type {
   PreKeyBundle,
 } from "./e2ee/index.js";
 
-// Safe Update (B) — announce-only by default; install is explicit
-export { UpdateChecker, isOlder } from "./update/index.js";
-export type { UpdateCheckerOptions, UpdateInfo } from "./update/index.js";
+// The update checker block (with the rest of the 0.2.0 surface) lives above.
 
 // Default export: the same login() function (ESM ergonomics; the CJS build re-exports it as the callable module itself).
 export { login as default } from "./login.js";

@@ -299,6 +299,20 @@ export class SessionManager {
       { userId, restored: compatible, cookieSource: store === providedStore ? "credentials" : "storage" },
       "credentials validated",
     );
+    
+    // Warn about cookies nearing expiry
+    const sevenDaysFromNow = Date.now() + (7 * 24 * 60 * 60 * 1000);
+    for (const cookieName of REQUIRED_COOKIES) {
+      const expiry = store.getCookieExpiry(cookieName);
+      if (expiry !== null && expiry > Date.now() && expiry < sevenDaysFromNow) {
+        const daysLeft = Math.floor((expiry - Date.now()) / (24 * 60 * 60 * 1000));
+        this.#logger.warn(
+          { cookie: cookieName, expiresIn: `${daysLeft} days` },
+          `Cookie "${cookieName}" expires soon - consider exporting fresh cookies to avoid authentication failures`,
+        );
+      }
+    }
+    
     return { userId, restored: compatible, persisted: compatible ? persisted : null };
   }
 

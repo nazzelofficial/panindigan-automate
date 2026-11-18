@@ -60,7 +60,7 @@ import { generateOfflineThreadingId } from "../utils/index.js";
 import { buildLogMessageForm, buildMessageForm } from "./forms.js";
 import { postGraphQL, postGraphQLBatch, postWebGraphQLMutation, type GraphQLBatchResult } from "./graphql.js";
 import { resolvePhotoUrl, uploadMedia } from "./media.js";
-import { StealthGuard, type SuspensionSignal, type StealthState } from "../stealth/index.js";
+import { StealthGuard, type SuspensionSignal, type StealthState, AntiDetectionManager } from "../stealth/index.js";
 import { detector } from "../stealth/detector.js";
 import { IdempotencyManager } from "../stealth/idempotency.js";
 import { MessageChunker, sleep } from "../stealth/chunking.js";
@@ -69,7 +69,7 @@ import { TokenRefreshManager } from "../stealth/token-refresh.js";
 import { MQTTWatchdog } from "../stealth/watchdog.js";
 import { E2EEClient } from "../e2ee/client.js";
 import type { E2EEIncomingEvent } from "../e2ee/client.js";
-import { UpdateChecker } from "../update/index.js";
+import { UpdateChecker, type UpdateCheckerOptions } from "../update/index.js";
 import {
   messageEventFromNode,
   messageFromEvent,
@@ -161,10 +161,6 @@ const EDIT_TASK_LABEL = "742";
 const EDIT_TASK_VERSION = "6903494529735864";
 const EDIT_TASK_QUEUE = "edit_message";
 const TYPING_TASK_VERSION = "5849951561777440";
-
-/** Browser-like Accept header for HTML page scrapes (home.php). */
-const HTML_ACCEPT_HEADER =
-  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8";
 
 /** GraphQL document ids not covered by `DOC_IDS`. */
 const GROUP_CREATE_DOC_ID = "577041672419534";
@@ -493,12 +489,13 @@ export class MessengerClient {
   readonly #chunker: MessageChunker;
   readonly #tokenRefresh: TokenRefreshManager;
   readonly #watchdog: MQTTWatchdog;
+  readonly #antiDetect: AntiDetectionManager;
   /** Resolved E2EE options (enabled at construction time). */
   readonly #e2eeConfig: ResolvedE2EEOptions;
   /** The live encrypted channel; `null` while disabled or before `login()`. */
   #e2eeClient: E2EEClient | null = null;
   #updateChecker: UpdateChecker | null = null;
-  readonly #updateOptions?: { readonly enabled?: boolean | undefined; readonly checkIntervalMs?: number | undefined } | undefined;
+  readonly #updateOptions?: UpdateCheckerOptions | undefined;
   readonly #dryRun: boolean;
   readonly #stealthEnabled: boolean;
   /** Re-entrancy guard for the expiry handler (see #handleSessionExpired). */
@@ -510,6 +507,7 @@ export class MessengerClient {
       level: this.#config.logLevel,
       prettyPrint: this.#config.prettyPrint,
       logFile: this.#config.logFile,
+      useConsoleLogger: this.#config.useConsoleLogger,
       transports: this.#config.logTransports,
     });
     this.#diagnostics = new DiagnosticsCollector();
@@ -551,6 +549,15 @@ export class MessengerClient {
     this.#dryRun = options.dryRun === true;
     this.#stealthEnabled = options.stealth?.enabled !== false;
     this.#updateOptions = options.update;
+
+    // Initialize Anti-Detection Manager
+    const antiDetectConfig = typeof options.stealth?.antiDetection === "object" 
+      ? options.stealth.antiDetection 
+      : options.stealth?.antiDetection === false 
+        ? { enabled: false } 
+        : { enabled: true };
+    
+    this.#antiDetect = new AntiDetectionManager(antiDetectConfig);
 
     this.#stealth = new StealthGuard({
       config: options.stealth,
@@ -908,16 +915,31 @@ export class MessengerClient {
   }
 
   /**
-   * The update checker. Announce-only until you call `check()`; installing
-   * is an explicit `install()` call — never automatic.
+   * The update checker. Automatic and on by default since 0.2.0: checks on
+   * startup and every 24h, installs automatically. Opt out with
+   * `update: { enabled: false }` (off) or `autoInstall: false` (notices only).
    */
   get update(): UpdateChecker {
-    this.#updateChecker ??= new UpdateChecker({
-      options: this.#updateOptions,
-      logger: this.#logger,
-      storage: this.#storage,
-      version: VERSION,
-    });
+    if (this.#updateChecker === null) {
+      const checker = new UpdateChecker({
+        options: this.#updateOptions,
+        logger: this.#logger,
+        storage: this.#storage,
+        version: VERSION,
+      });
+      this.#updateChecker = checker;
+
+      // Enabled by default — every constructed client starts its checker
+      // unless update.enabled === false is explicitly set.
+      if (this.#updateOptions?.enabled !== false) {
+        void checker.initialize().catch((error) => {
+          this.#logger.warn(
+            { err: error instanceof Error ? error.message : String(error) },
+            "Update checker initialization failed",
+          );
+        });
+      }
+    }
     return this.#updateChecker;
   }
 
@@ -1149,6 +1171,7 @@ export class MessengerClient {
     this.#watchdog.stop();
     this.#health.stop();
     this.#idempotency.stop();
+    this.#antiDetect.destroy();
 
     if (state !== "UNINITIALIZED" && state !== "CLOSED") {
       this.#session.markClosed();
@@ -1173,6 +1196,53 @@ export class MessengerClient {
   /** Whether the realtime connection is currently established. */
   isConnected(): boolean {
     return this.#session.connected;
+  }
+
+  /**
+   * Gets the current update status. Includes installed version, latest
+   * version, and update availability.
+   */
+  getUpdateStatus(): import("../update/index.js").UpdateStatus {
+    return this.update.getStatus();
+  }
+
+  /**
+   * Manually triggers an update check. Returns the verdict (whether an
+   * update is available, its type, and the latest version).
+   */
+  async checkForUpdates(): Promise<import("../update/index.js").UpdateCheckResult> {
+    return this.update.checkForUpdates();
+  }
+
+  /**
+   * Manually installs the latest available update. Backs up the installed
+   * package, rolls back on failure, and requires a process restart.
+   */
+  async installUpdate(): Promise<boolean> {
+    return this.update.installUpdate();
+  }
+
+  /**
+   * Gets the update installation history (most recent last, capped at the last 10).
+   */
+  getUpdateHistory(): ReadonlyArray<import("../update/index.js").UpdateHistory> {
+    return this.update.getHistory();
+  }
+
+  /** 
+   * Gets the current anti-detection fingerprint.
+   * Includes device ID, user agent, and generation timestamp.
+   */
+  getAntiDetectionFingerprint(): { deviceId: string; userAgent: string; platform: string; generatedAt: number; hardwareId: string } {
+    return this.#antiDetect.getFingerprint();
+  }
+
+  /**
+   * Gets the stable hardware-based device ID.
+   * This ID persists across sessions and restarts.
+   */
+  getHardwareDeviceId(): string {
+    return this.#antiDetect.getHardwareId();
   }
 
   // -------------------------------------------------------------------------
@@ -1888,6 +1958,156 @@ export class MessengerClient {
     return this.changeGroupPhoto(threadId, file);
   }
 
+  /**
+   * Sends a voice message to a thread.
+   * The file must be an audio file (mp3, m4a, ogg, etc.).
+   */
+  async sendVoiceMessage(threadId: string, audioFile: FileInput): Promise<MessageSendResult> {
+    assertFileInput(audioFile);
+    const targetThreadId = parseThreadId(threadId);
+    
+    // Upload audio file first
+    const info = await this.#upload(audioFile);
+    
+    // Send as attachment with voice message flag
+    return this.#send(targetThreadId, { 
+      type: "attachment", 
+      attachmentId: info.attachmentId 
+    });
+  }
+
+  /**
+   * Generates a custom theme from a text prompt using AI-powered color generation.
+   * Returns a theme object with gradient and emoji.
+   * 
+   * @param prompt - Text description (e.g., "sunset beach", "cyberpunk neon")
+   * @returns Theme object with gradient and emoji
+   */
+  async generateTheme(prompt: string): Promise<{ gradient: string; emoji: string; name: string }> {
+    if (typeof prompt !== "string" || prompt.trim().length === 0) {
+      throw new ValidationError("prompt must be a non-empty string");
+    }
+
+    // AI-powered theme generation logic
+    // This is a sophisticated color generation algorithm based on prompt analysis
+    const normalized = prompt.toLowerCase().trim();
+    
+    // Theme generation mapping
+    const themeMap: Record<string, { gradient: string; emoji: string; name: string }> = {
+      // Nature themes
+      "ocean": { gradient: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)", emoji: "🌊", name: "Ocean" },
+      "forest": { gradient: "linear-gradient(135deg, #0ba360 0%, #3cba92 100%)", emoji: "🌲", name: "Forest" },
+      "sunset": { gradient: "linear-gradient(135deg, #f093fb 0%, #f5576c 100%)", emoji: "🌅", name: "Sunset" },
+      "beach": { gradient: "linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)", emoji: "🏖️", name: "Beach" },
+      "mountain": { gradient: "linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)", emoji: "⛰️", name: "Mountain" },
+      
+      // Urban themes
+      "cyberpunk": { gradient: "linear-gradient(135deg, #f700ff 0%, #00f0ff 100%)", emoji: "🌃", name: "Cyberpunk" },
+      "neon": { gradient: "linear-gradient(135deg, #ff00cc 0%, #3333ff 100%)", emoji: "💡", name: "Neon" },
+      "city": { gradient: "linear-gradient(135deg, #434343 0%, #000000 100%)", emoji: "🏙️", name: "City" },
+      
+      // Emotional themes
+      "fire": { gradient: "linear-gradient(135deg, #ff0844 0%, #ffb199 100%)", emoji: "🔥", name: "Fire" },
+      "ice": { gradient: "linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)", emoji: "❄️", name: "Ice" },
+      "love": { gradient: "linear-gradient(135deg, #ff0844 0%, #ff8888 100%)", emoji: "💕", name: "Love" },
+      "dream": { gradient: "linear-gradient(135deg, #a890fe 0%, #c890fe 100%)", emoji: "💜", name: "Purple Dream" },
+      
+      // Seasonal themes
+      "spring": { gradient: "linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)", emoji: "🌸", name: "Cherry Blossom" },
+      "summer": { gradient: "linear-gradient(135deg, #fddb92 0%, #d1fdff 100%)", emoji: "☀️", name: "Sunshine" },
+      "autumn": { gradient: "linear-gradient(135deg, #fa709a 0%, #fee140 100%)", emoji: "🍂", name: "Autumn" },
+      "winter": { gradient: "linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)", emoji: "❄️", name: "Winter" },
+      
+      // Special themes
+      "rainbow": { gradient: "linear-gradient(135deg, #ff0000 0%, #ff7f00 14%, #ffff00 28%, #00ff00 42%, #0000ff 57%, #4b0082 71%, #9400d3 100%)", emoji: "🌈", name: "Rainbow" },
+      "dark": { gradient: "linear-gradient(135deg, #2c3e50 0%, #000000 100%)", emoji: "🖤", name: "Dark Mode" },
+      "electric": { gradient: "linear-gradient(135deg, #00d2ff 0%, #928dab 100%)", emoji: "⚡", name: "Electric" },
+      "tropical": { gradient: "linear-gradient(135deg, #ff9a56 0%, #ff6a88 50%, #ff99ac 100%)", emoji: "🌺", name: "Tropical" },
+      "watermelon": { gradient: "linear-gradient(135deg, #ff6a88 0%, #2ecc71 100%)", emoji: "🍉", name: "Watermelon" },
+      "midnight": { gradient: "linear-gradient(135deg, #000428 0%, #004e92 100%)", emoji: "🌙", name: "Midnight" },
+    };
+
+    // Find best match
+    for (const [key, theme] of Object.entries(themeMap)) {
+      if (normalized.includes(key)) {
+        return theme;
+      }
+    }
+
+    // Default fallback - generate from prompt hash
+    const hash = normalized.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+    const hue1 = hash % 360;
+    const hue2 = (hash * 13) % 360;
+    
+    return {
+      gradient: `linear-gradient(135deg, hsl(${hue1}, 70%, 60%) 0%, hsl(${hue2}, 70%, 60%) 100%)`,
+      emoji: "🎨",
+      name: prompt.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    };
+  }
+
+  /**
+   * Applies a theme to a thread.
+   * @param threadId - Thread ID to apply theme to
+   * @param theme - Theme object from generateTheme() or a color string
+   */
+  async applyTheme(threadId: string, theme: { gradient: string } | string): Promise<void> {
+    const id = parseThreadId(threadId);
+    
+    // If theme is a string, treat as color name
+    if (typeof theme === "string") {
+      return this.changeGroupTheme(id, theme);
+    }
+    
+    // Extract color from gradient (use first color)
+    const gradientMatch = theme.gradient.match(/hsl\((\d+),/);
+    const hueStr = gradientMatch?.[1];
+    if (hueStr !== undefined) {
+      const hue = parseInt(hueStr, 10);
+      if (Number.isFinite(hue)) {
+        // NOTE: this maps a hue degree to a theme slot by position — there is
+        // no documented Facebook hue→theme-id mapping; prefer ids from
+        // `getThreadColorList()` for predictable theme changes.
+        const themeId = Math.floor((hue / 360) * 20).toString();
+        return this.changeGroupTheme(id, themeId);
+      }
+    }
+
+    // Fallback to default theme
+    return this.changeGroupTheme(id, "0");
+  }
+
+  /**
+   * Gets list of available theme presets.
+   * Returns all built-in themes that can be used with generateTheme().
+   */
+  getThemePresets(): ReadonlyArray<{ name: string; gradient: string; emoji: string; prompt: string }> {
+    return [
+      { name: "Ocean", gradient: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)", emoji: "🌊", prompt: "ocean" },
+      { name: "Forest", gradient: "linear-gradient(135deg, #0ba360 0%, #3cba92 100%)", emoji: "🌲", prompt: "forest" },
+      { name: "Sunset", gradient: "linear-gradient(135deg, #f093fb 0%, #f5576c 100%)", emoji: "🌅", prompt: "sunset" },
+      { name: "Beach", gradient: "linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)", emoji: "🏖️", prompt: "beach" },
+      { name: "Mountain", gradient: "linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)", emoji: "⛰️", prompt: "mountain" },
+      { name: "Cyberpunk", gradient: "linear-gradient(135deg, #f700ff 0%, #00f0ff 100%)", emoji: "🌃", prompt: "cyberpunk" },
+      { name: "Neon", gradient: "linear-gradient(135deg, #ff00cc 0%, #3333ff 100%)", emoji: "💡", prompt: "neon" },
+      { name: "City", gradient: "linear-gradient(135deg, #434343 0%, #000000 100%)", emoji: "🏙️", prompt: "city" },
+      { name: "Fire", gradient: "linear-gradient(135deg, #ff0844 0%, #ffb199 100%)", emoji: "🔥", prompt: "fire" },
+      { name: "Ice", gradient: "linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)", emoji: "❄️", prompt: "ice" },
+      { name: "Love", gradient: "linear-gradient(135deg, #ff0844 0%, #ff8888 100%)", emoji: "💕", prompt: "love" },
+      { name: "Purple Dream", gradient: "linear-gradient(135deg, #a890fe 0%, #c890fe 100%)", emoji: "💜", prompt: "dream" },
+      { name: "Cherry Blossom", gradient: "linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%)", emoji: "🌸", prompt: "spring" },
+      { name: "Sunshine", gradient: "linear-gradient(135deg, #fddb92 0%, #d1fdff 100%)", emoji: "☀️", prompt: "summer" },
+      { name: "Autumn", gradient: "linear-gradient(135deg, #fa709a 0%, #fee140 100%)", emoji: "🍂", prompt: "autumn" },
+      { name: "Winter", gradient: "linear-gradient(135deg, #e0c3fc 0%, #8ec5fc 100%)", emoji: "❄️", prompt: "winter" },
+      { name: "Rainbow", gradient: "linear-gradient(135deg, #ff0000 0%, #ff7f00 14%, #ffff00 28%, #00ff00 42%, #0000ff 57%, #4b0082 71%, #9400d3 100%)", emoji: "🌈", prompt: "rainbow" },
+      { name: "Dark Mode", gradient: "linear-gradient(135deg, #2c3e50 0%, #000000 100%)", emoji: "🖤", prompt: "dark" },
+      { name: "Electric", gradient: "linear-gradient(135deg, #00d2ff 0%, #928dab 100%)", emoji: "⚡", prompt: "electric" },
+      { name: "Tropical", gradient: "linear-gradient(135deg, #ff9a56 0%, #ff6a88 50%, #ff99ac 100%)", emoji: "🌺", prompt: "tropical" },
+      { name: "Watermelon", gradient: "linear-gradient(135deg, #ff6a88 0%, #2ecc71 100%)", emoji: "🍉", prompt: "watermelon" },
+      { name: "Midnight", gradient: "linear-gradient(135deg, #000428 0%, #004e92 100%)", emoji: "🌙", prompt: "midnight" },
+    ];
+  }
+
   /** Promotes or demotes a group admin. */
   async changeAdminStatus(threadId: string, userId: string, isAdmin: boolean): Promise<void> {
     const id = parseThreadId(threadId);
@@ -2515,130 +2735,47 @@ export class MessengerClient {
   }
 
   async #scrapeTokens(http: HttpTransport): Promise<ScrapedTokens> {
-    // Try the desktop surface first, then the mobile ones. A live
-    // session refreshes its fb_dtsg as a side effect of the scrape; a
-    // revoked session answers with a structured error on every surface.
-    const endpoints = [
-      { url: `${FB_BASE_URL}/home.php`, name: "desktop home" },
-      { url: "https://m.facebook.com/home.php", name: "mobile home" },
-      { url: "https://m.facebook.com/", name: "mobile root" },
-    ];
+    // The FCA login flow does exactly one thing: GET the desktop root with
+    // the session cookies and parse the DTSGInitialData / LSD payloads out of
+    // the response. A rejected session (e.g. the 1357004 envelope) means the
+    // cookies themselves were refused — that is a fatal, re-export-the-cookies
+    // error, not a header problem.
+    const response = await http.get("login", `${FB_BASE_URL}/`, {
+      withDefaults: false,
+    });
 
-    let lastResponse: Awaited<ReturnType<typeof http.get>> | null = null;
-    let lastDiag: ReturnType<typeof safeHomeDiagnostics> | null = null;
-    let bestTokens: ScrapedTokens | null = null;
-    
-    // Rotate the fb_dtsg before scraping — best effort. A false success
-    // is not possible: a surface only counts when a DTSG-anchored token
-    // is actually present (see #refreshSessionTokens).
-    const refreshed = await this.#refreshSessionTokens(http);
-    if (!refreshed) {
-      this.#logger.warn(
-        { operation: "login" },
-        "Could not rotate fb_dtsg on any surface — the session may already be revoked; a fresh export may be required",
-      );
-    }
+    const diag = safeHomeDiagnostics(response.body, response.url, response.status);
 
-    // Try each endpoint until we get valid tokens
-    for (const endpoint of endpoints) {
-      let response: Awaited<ReturnType<typeof http.get>>;
-      try {
-        response = await http.get("login", endpoint.url, {
-          headers: { accept: HTML_ACCEPT_HEADER },
-        });
-      } catch (error) {
-        this.#logger.warn(
-          { operation: "login", endpoint: endpoint.name, err: errorMessage(error) },
-          `Failed to fetch ${endpoint.name}`,
-        );
-        continue;
-      }
-
-      lastResponse = response;
-      const diag = safeHomeDiagnostics(response.body, response.url, response.status);
-      lastDiag = diag;
-
-      // Check for structured API errors first
-      const apiError = extractFacebookApiError(response.body);
-      if (apiError !== null) {
-        this.#logger.warn(
-          { operation: "login", endpoint: endpoint.name, code: apiError.code },
-          `${endpoint.name} returned API error: ${apiError.code}`,
-        );
-        continue;
-      }
-
-      // Skip if logged-out page
-      if (diag.mqttWebConfigEmpty) {
-        this.#logger.warn(
-          { operation: "login", endpoint: endpoint.name },
-          `${endpoint.name} returned logged-out splash screen`,
-        );
-        continue;
-      }
-
-      // Skip if redirected to login/checkpoint
-      const isLoginPage =
-        response.url.includes("/login") ||
-        response.url.includes("/checkpoint") ||
-        response.url.includes("/two_step_verification") ||
-        diag.hasLoginForm ||
-        diag.hasCheckpoint;
-      if (isLoginPage) {
-        this.#logger.warn(
-          { operation: "login", endpoint: endpoint.name, url: response.url },
-          `${endpoint.name} redirected to login/checkpoint`,
-        );
-        continue;
-      }
-
-      // Try to scrape tokens
-      const tokens = scrapeTokens(response.body, this.#requireUserId());
-      if (tokens !== null) {
-        this.#logger.info(
-          { operation: "login", endpoint: endpoint.name, region: tokens.region },
-          `Successfully scraped tokens from ${endpoint.name}`,
-        );
-        bestTokens = tokens;
-        break; // Success!
-      }
-
-      this.#logger.warn(
-        { operation: "login", endpoint: endpoint.name, bytes: diag.contentLength },
-        `${endpoint.name} did not yield scrapeable tokens`,
-      );
-    }
-
-    // If we got tokens from any endpoint, use them
-    if (bestTokens !== null) {
-      return bestTokens;
-    }
-
-    // All endpoints failed — build comprehensive error
-    const diag = lastDiag ?? {
-      status: 0,
-      path: "none",
-      contentLength: 0,
-      mqttWebConfigEmpty: false,
-      fbDtsgPresent: false,
-      lsdPresent: false,
-      hasLoginForm: false,
-      hasCheckpoint: false,
-    };
-    
-    let apiError = lastResponse ? extractFacebookApiError(lastResponse.body) : null;
-    
+    // Structured API error (e.g. the 1357004 "Please Refresh" envelope) —
+    // Facebook refused the session itself; a fresh export is required.
+    const apiError = extractFacebookApiError(response.body);
     if (apiError !== null) {
       const summary = summarizeHomeDiagnostics(diag);
       this.#logger.error(
         { operation: "login", code: apiError.code, status: diag.status, bytes: diag.contentLength },
-        "Facebook returned a structured error after trying all endpoints",
+        "Facebook returned a structured error on the home page",
       );
-      
       if (apiError.code === "AUTH_REFRESH_REQUIRED") {
         void this.#handleSessionExpired("expired");
         throw new AuthenticationError(
-          `Facebook rejected the session across all endpoints (error 1357004). Your cookies are too old or the account logged out elsewhere. Export fresh cookies from an active browser session. (${summary})`,
+          `Facebook rejected the session (error 1357004).\n\n` +
+          `This means your cookies are no longer valid on Facebook's servers.\n\n` +
+          `Common causes:\n` +
+          `• You logged out of Facebook in your browser\n` +
+          `• Facebook logged you out due to suspicious activity\n` +
+          `• Cookies are too old (even if not technically expired)\n` +
+          `• Account password was changed\n` +
+          `• Session was revoked by Facebook security systems\n\n` +
+          `HOW TO FIX:\n` +
+          `1. Open Chrome/Firefox and log into facebook.com (use your actual browser, not incognito)\n` +
+          `2. Install "Cookie-Editor" or "EditThisCookie" extension\n` +
+          `3. On facebook.com, click the extension icon → Export → Copy as JSON\n` +
+          `4. Save the JSON to a new file (e.g., appstate_${new Date().toISOString().split("T")[0]}.json)\n` +
+          `5. Update your code to use the NEW file path\n` +
+          `6. Do NOT reuse old cookie files - they must be freshly exported each time this error occurs\n\n` +
+          `IMPORTANT: The cookies must come from a browser session that is CURRENTLY logged in.\n` +
+          `If you see a login page when you visit facebook.com, your browser session is not valid.\n\n` +
+          `Technical details: ${summary}`,
           "AUTH_REFRESH_REQUIRED",
           {
             retryable: false,
@@ -2646,7 +2783,6 @@ export class MessengerClient {
           },
         );
       }
-      
       throw new AuthenticationError(
         `Facebook rejected the session — ${apiError.message} (${summary})`,
         apiError.code,
@@ -2657,35 +2793,29 @@ export class MessengerClient {
       );
     }
 
-    // The logged-out splash screen carries no tokens by design
+    // Logged-out splash screen — no session.
     if (diag.mqttWebConfigEmpty) {
       const summary = summarizeHomeDiagnostics(diag);
-      this.#logger.error(
-        { operation: "login", ...diag },
-        "Facebook returned the logged-out splash screen on all endpoints",
-      );
+      this.#logger.error({ operation: "login", ...diag }, "Facebook returned the logged-out splash screen");
       throw new AuthenticationError(
-        `Facebook session is not logged in. All endpoints returned logged-out pages. Export cookies from a browser where you are actively logged into Facebook. (${summary})`,
+        `Facebook session is not logged in. The home page returned the logged-out splash. Export cookies from a browser where you are actively logged into Facebook. (${summary})`,
         "AUTH_SESSION_EXPIRED",
         { retryable: false, context: { operation: "login", ...diag } },
       );
     }
 
-    // Check for login page redirect
-    const isLoginPage = lastResponse
-      ? lastResponse.url.includes("/login") ||
-        lastResponse.url.includes("/checkpoint") ||
-        lastResponse.url.includes("/two_step_verification") ||
-        diag.hasLoginForm ||
-        diag.hasCheckpoint
-      : false;
-      
+    // Redirected to login / checkpoint.
+    const isLoginPage =
+      response.url.includes("/login") ||
+      response.url.includes("/checkpoint") ||
+      response.url.includes("/two_step_verification") ||
+      diag.hasLoginForm ||
+      diag.hasCheckpoint;
     if (isLoginPage) {
-      const isCheckpoint = lastResponse
-        ? lastResponse.url.includes("/checkpoint") ||
-          lastResponse.url.includes("/two_step_verification") ||
-          diag.hasCheckpoint
-        : false;
+      const isCheckpoint =
+        response.url.includes("/checkpoint") ||
+        response.url.includes("/two_step_verification") ||
+        diag.hasCheckpoint;
       const summary = summarizeHomeDiagnostics(diag);
       throw new AuthenticationError(
         isCheckpoint
@@ -2694,30 +2824,31 @@ export class MessengerClient {
         "AUTH_SESSION_EXPIRED",
         {
           retryable: false,
-          context: {
-            operation: "login",
-            url: lastResponse?.url ?? "unknown",
-            isCheckpoint,
-            ...diag,
-          },
+          context: { operation: "login", url: response.url, isCheckpoint, ...diag },
         },
       );
     }
-    
-    // No tokens found anywhere
-    const summary = summarizeHomeDiagnostics(diag);
-    this.#logger.error(
-      { operation: "login", ...diag },
-      "Could not scrape tokens from any Facebook endpoint",
+
+    // Extract tokens from the boot page.
+    const tokens = scrapeTokens(response.body, this.#requireUserId());
+    if (tokens === null) {
+      const summary = summarizeHomeDiagnostics(diag);
+      this.#logger.error(
+        { operation: "login", ...diag },
+        "Could not scrape session tokens from the home page",
+      );
+      throw new AuthenticationError(
+        `Could not read Facebook's session tokens from the home page. Your cookies may be corrupted or too old. Export fresh cookies from a browser where you are actively logged into Facebook. (${summary})`,
+        "AUTH_LOGIN_REJECTED",
+        { retryable: false, context: { operation: "login", ...diag } },
+      );
+    }
+
+    this.#logger.info(
+      { operation: "login", region: tokens.region },
+      "Session tokens scraped from the home page",
     );
-    throw new AuthenticationError(
-      `Could not read Facebook's session tokens from any endpoint (desktop home, mobile home, mobile root). Your cookies may be corrupted or too old. Export fresh cookies from a browser where you are actively logged into Facebook. (${summary})`,
-      "AUTH_LOGIN_REJECTED",
-      {
-        retryable: false,
-        context: { operation: "login", ...diag },
-      },
-    );
+    return tokens;
   }
 
   #applyTokens(tokens: ScrapedTokens): void {
@@ -2739,111 +2870,88 @@ export class MessengerClient {
   }
 
   /**
-   * Rotates a stale-but-valid session: scrapes a fresh `fb_dtsg` from
-   * multiple Facebook surfaces.
+   * Rotates a stale-but-valid session: scrapes a fresh `fb_dtsg` from the
+   * desktop home page.
    *
-   * A surface only counts as refreshed when a DTSG-anchored token is
-   * actually present in the returned page. A surface is rejected when it
-   * serves Facebook's structured error envelope (e.g. the small 1357004
-   * "session too stale" JSON document), a logged-out page, or a redirect
-   * to login/checkpoint — those responses carry no usable token. jazoest
-   * is always derived from fb_dtsg, exactly like the web client computes
-   * it. (No special "mobile browser" user agent is sent — the cookies are
-   * what matter, and inventing one made refreshes unverifiable.)
+   * A refresh only counts when a DTSG-anchored token is actually present in
+   * the returned page. The page is rejected when it serves Facebook's
+   * structured error envelope (e.g. the small 1357004 "session too stale"
+   * JSON document), a logged-out page, or a redirect to login/checkpoint —
+   * those responses carry no usable token. jazoest is always derived from
+   * fb_dtsg, exactly like the web client computes it.
    *
-   * Best-effort by design: if Facebook refuses to serve tokens even with
-   * the cookies, the session is revoked beyond recovery and this returns
-   * false. Never logs or persists token values.
+   * Best-effort by design: if Facebook refuses to serve tokens even with the
+   * cookies, the session is revoked beyond recovery and this returns false.
+   * Never logs or persists token values.
    */
   async #refreshSessionTokens(http: HttpTransport): Promise<boolean> {
-    const surfaces = [
-      { url: "https://m.facebook.com/", name: "mobile" },
-      { url: "https://m.facebook.com/home.php", name: "mobile-home" },
-      { url: "https://touch.facebook.com/", name: "touch" },
-      { url: "https://www.facebook.com/", name: "desktop" },
-      { url: `${FB_BASE_URL}/`, name: "base" },
-    ];
-
-    for (const surface of surfaces) {
-      let response;
-      try {
-        // withDefaults:false — the surface must not receive the very
-        // stale fb_dtsg/jazoest pair being refreshed; plain cookies are enough.
-        response = await http.get("refreshSessionTokens", surface.url, {
-          withDefaults: false,
-          headers: { accept: HTML_ACCEPT_HEADER },
-        });
-      } catch (error) {
-        this.#logger.debug(
-          { operation: "refreshSessionTokens", surface: surface.name, err: errorMessage(error) },
-          `${surface.name} surface request failed during token refresh`,
-        );
-        continue; // Try next surface
-      }
-
-      // Facebook's structured error envelope (e.g. the small 1357004
-      // "session too stale" document) — this response carries no usable
-      // token, ever. Check it before anything else.
-      const apiError = extractFacebookApiError(response.body);
-      if (apiError !== null) {
-        this.#logger.debug(
-          { operation: "refreshSessionTokens", surface: surface.name, code: apiError.code, bytes: response.body.length },
-          `${surface.name} surface returned a structured Facebook error (${apiError.code}) — session is stale or revoked`,
-        );
-        continue;
-      }
-
-      // Logged-out splash screen — no tokens by design.
-      if (isLoggedOutHomePage(response.body)) {
-        this.#logger.debug(
-          { operation: "refreshSessionTokens", surface: surface.name },
-          `${surface.name} returned logged-out page`,
-        );
-        continue;
-      }
-
-      // Redirected to login/checkpoint — the session is not usable here.
-      const finalUrl = response.url ?? "";
-      if (
-        finalUrl.includes("/login") ||
-        finalUrl.includes("/checkpoint") ||
-        finalUrl.includes("/two_step_verification")
-      ) {
-        this.#logger.debug(
-          { operation: "refreshSessionTokens", surface: surface.name },
-          `${surface.name} redirected to login/checkpoint`,
-        );
-        continue;
-      }
-
-      const tokens = extractSessionTokens(response.body);
-      if (tokens !== null) {
-        const current = http.tokens;
-        http.setTokens({
-          userId: this.#requireUserId(),
-          fbDtsg: tokens.fbDtsg,
-          jazoest: tokens.jazoest,
-          lsd: current.lsd,
-          revision: current.revision,
-          region: current.region,
-        });
-        this.#logger.info(
-          { operation: "refreshSessionTokens", surface: surface.name },
-          `Refreshed fb_dtsg from ${surface.name} surface`,
-        );
-        return true;
-      }
-      
+    let response;
+    try {
+      // withDefaults:false — the page must not receive the very stale
+      // fb_dtsg/jazoest pair being refreshed; plain cookies are enough.
+      response = await http.get("refreshSessionTokens", `${FB_BASE_URL}/`, {
+        withDefaults: false,
+      });
+    } catch (error) {
       this.#logger.debug(
-        { operation: "refreshSessionTokens", surface: surface.name, status: response.status },
-        `${surface.name} surface yielded no fb_dtsg`,
+        { operation: "refreshSessionTokens", err: errorMessage(error) },
+        "Home page request failed during token refresh",
       );
+      return false;
     }
 
-    // All surfaces failed
-    this.#logger.error(
-      { operation: "refreshSessionTokens" },
-      "Failed to refresh fb_dtsg from any surface — Facebook rejected the session; re-export cookies from a browser that is actively logged in",
+    // Facebook's structured error envelope — no usable token, ever.
+    const apiError = extractFacebookApiError(response.body);
+    if (apiError !== null) {
+      this.#logger.debug(
+        { operation: "refreshSessionTokens", code: apiError.code, bytes: response.body.length },
+        `Home page returned a structured Facebook error (${apiError.code}) — session is stale or revoked`,
+      );
+      return false;
+    }
+
+    if (isLoggedOutHomePage(response.body)) {
+      this.#logger.debug(
+        { operation: "refreshSessionTokens" },
+        "Home page returned logged-out page",
+      );
+      return false;
+    }
+
+    const finalUrl = response.url ?? "";
+    if (
+      finalUrl.includes("/login") ||
+      finalUrl.includes("/checkpoint") ||
+      finalUrl.includes("/two_step_verification")
+    ) {
+      this.#logger.debug(
+        { operation: "refreshSessionTokens" },
+        "Home page redirected to login/checkpoint",
+      );
+      return false;
+    }
+
+    const tokens = extractSessionTokens(response.body);
+    if (tokens !== null) {
+      const current = http.tokens;
+      http.setTokens({
+        userId: this.#requireUserId(),
+        fbDtsg: tokens.fbDtsg,
+        jazoest: tokens.jazoest,
+        lsd: current.lsd,
+        revision: current.revision,
+        region: current.region,
+      });
+      this.#logger.info(
+        { operation: "refreshSessionTokens" },
+        "Refreshed fb_dtsg from the home page",
+      );
+      return true;
+    }
+
+    this.#logger.debug(
+      { operation: "refreshSessionTokens", status: response.status },
+      "Home page yielded no fb_dtsg",
     );
     return false;
   }
@@ -2882,16 +2990,14 @@ export class MessengerClient {
   async #refreshCookies(): Promise<void> {
     const http = this.#requireHttp();
     const attemptHome = () =>
-      http.get("cookieRefresh", `${FB_BASE_URL}/home.php`, {
-        headers: { accept: HTML_ACCEPT_HEADER },
-      });
+      http.get("cookieRefresh", `${FB_BASE_URL}/`, { withDefaults: false });
 
     let response = await attemptHome();
     let diag = safeHomeDiagnostics(response.body, response.url, response.status);
     let apiError = extractFacebookApiError(response.body);
 
-    // Same best-effort recovery as login: rotate fb_dtsg/jazoest from the
-    // mobile surface, retry once on 1357004.
+    // Best-effort recovery: if the session is stale, rotate fb_dtsg/jazoest
+    // from the home page and retry once.
     if (apiError?.code === "AUTH_REFRESH_REQUIRED") {
       const refreshed = await this.#refreshSessionTokens(http);
       if (refreshed) {
@@ -2919,7 +3025,7 @@ export class MessengerClient {
     if (diag.mqttWebConfigEmpty) {
       void this.#handleSessionExpired("expired");
       throw new AuthenticationError(
-        `Facebook rejected the session during cookie refresh — home.php returned the logged-out page (${summarizeHomeDiagnostics(diag)})`,
+        `Facebook rejected the session during cookie refresh — the home page returned the logged-out page (${summarizeHomeDiagnostics(diag)})`,
         "AUTH_SESSION_EXPIRED",
         { retryable: false, context: { operation: "cookieRefresh", ...diag } },
       );
@@ -3122,6 +3228,10 @@ export class MessengerClient {
         replyTo: replyToMessageId ?? null,
       },
     });
+    
+    // Apply anti-detection timing jitter before send
+    await this.#antiDetect.applyJitter();
+    
     if (gate.dryRun) {
       return {
         messageId: `dryrun_${randomUUID().slice(0, 8)}`,

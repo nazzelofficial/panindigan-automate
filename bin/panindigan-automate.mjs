@@ -32,7 +32,7 @@ console.log("panindigan-automate doctor\n");
 
 // 1. Node version
 const major = Number.parseInt(process.versions.node.split(".")[0] ?? "0", 10);
-record("node >= 20", major >= 20, `node ${process.versions.node}`);
+record("node >= 22", major >= 22, `node ${process.versions.node}`);
 
 // 2. Credentials present and minimally valid
 const envState = process.env.APPSTATE;

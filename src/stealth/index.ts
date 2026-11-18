@@ -1,16 +1,19 @@
 /**
- * Stealth Guard — Facebook suspension prevention.
+ * Stealth Guard — Facebook suspension prevention with advanced anti-detection.
  *
  * The bot never behaves in a way that trips Facebook's restriction
  * systems, and stops itself safely the moment risk signals appear.
- * A safety governor, not a cloak: it reduces the chance an account trips
- * restrictions; it cannot make an automated personal account "safe".
+ * A safety governor with built-in anti-detection: it reduces the chance 
+ * an account trips restrictions through both behavioral controls and 
+ * fingerprint management.
  *
  * Components:
  * - `SuspensionDetector` — signal detection across HTTP/GraphQL/MQTT/raw text
  * - `StealthGuard` — circuit breaker, per-operation token buckets,
  *   sliding-window caps with warning pauses, warmup mode, pacing jitter,
  *   audit log of every decision
+ * - `AntiDetectionManager` — session fingerprints, hardware device IDs,
+ *   request obfuscation, timing jitter, user agent rotation
  */
 
 import type { Logger } from "../logger/index.js";
@@ -23,6 +26,12 @@ import {
   type RateLimitConfig,
   type WindowState,
 } from "./rate-limiter.js";
+import {
+  AntiDetectionManager,
+  DEFAULT_ANTI_DETECTION_CONFIG,
+  type AntiDetectionConfig,
+  type DeviceFingerprint,
+} from "./anti-detection.js";
 
 export type SuspensionSeverity = "warn" | "pause" | "halt" | "critical";
 
@@ -69,6 +78,8 @@ export interface StealthConfig {
   /** Pacing multiplier applied once a cap warning is active. Default 2. */
   readonly capWarningDelayMultiplier: number;
   readonly limits: OperationLimits;
+  /** Advanced anti-detection protection. Default `true` (opt-in to disable). */
+  readonly antiDetection: boolean | AntiDetectionConfig;
 }
 
 export type CircuitState = "closed" | "open" | "half_open";
@@ -128,6 +139,7 @@ export const DEFAULT_STEALTH_CONFIG: StealthConfig = {
     createGroup: { burst: 2, sustained: 5, refillRate: 5 / 3600 },
     global: { burst: 50, sustained: 200, refillRate: 200 / 3600 },
   },
+  antiDetection: true
 };
 
 /** Guard's view of an outbound operation. */
@@ -513,3 +525,17 @@ export class StealthGuard {
     }
   }
 }
+
+// Re-export anti-detection components
+export {
+  AntiDetectionManager,
+  DEFAULT_ANTI_DETECTION_CONFIG,
+  generateHardwareDeviceId,
+  generateUserAgent,
+  generateClientHints,
+  applyTimingJitter,
+  humanLikeDelay,
+  calculateAdaptiveDelay,
+  type AntiDetectionConfig,
+  type DeviceFingerprint,
+} from "./anti-detection.js";

@@ -2,13 +2,44 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-11-18
 
-### Planned
+### Changed
 
-- Optional Redis (`ioredis`) and SQLite (`better-sqlite3`) adapters for cache and storage
-- Sentry (`@sentry/node`) log transport
-- OpenTelemetry tracing hooks for the diagnostics module
+- **Login scrape is a single desktop root-page GET** (the same shape the actively maintained FCA login helpers use). The desktop-home → mobile-home → mobile-root multi-endpoint loop and the proactive pre-scrape token rotation were removed; `#refreshCookies` performs the in-flight recovery when Facebook presently rejects the session.
+- **Transport headers lean browser-navigation-shaped** (`text/html` accept first, `upgrade-insecure-requests`, Chrome client hints). Removed the jQuery-style `x-requested-with: XMLHttpRequest` header.
+- **The "Accept header is decisive" theory was removed.** Production logs show the deployment received the 1357004 envelope while already sending `Accept: text/html,…` — the header does not decide; the session does. Comments claiming unverified external verification were removed as well.
+
+### Added
+
+- **Anti-Detection helpers** (`AntiDetectionManager`, `generateHardwareDeviceId`, `generateUserAgent`, and related exports at the package root) — **enabled by default** since 0.2.0 (opt out with `stealth: { antiDetection: false }`). Contains randomized pre-send timing, subscription staggering on connect, and a fingerprint API (`getAntiDetectionFingerprint()` / `getHardwareDeviceId()` — a hash of the machine's CPU/MAC/hostname, used nowhere on the wire). Unverified: claims such as "indistinguishable from human behavior" are not measurable and are not to be taken as a guarantee. The Stealth Guard still stops the bot at checkpoints; nothing here bypasses them.
+- **MQTT timing helpers** (`MqttObfuscationManager`) — internal subscription-order staggering, presence-pattern jitter, connect jitter, publish spacing. Enabled by default in the MQTT transport; randomized timing only, with no claim of a measured anti-detection effect.
+- **Automatic updates, on by default (opt-out).** The automatic update system is here, gated by explicit opt-out. With no `update` options, clients check the npm registry on startup and every 24 hours, and install a newer published version automatically (with backup and rollback on failure; a process restart is required — the bot is not restarted for you). Announce-only mode: `update: { autoInstall: false }`. Fully disabled: `update: { enabled: false }`. The full surface is exposed: `initialize()` / `checkForUpdates()` / `installUpdate()` / `getStatus()` / `getHistory()` / `getLatestVersion()` / `stop()`, package-manager detection (lockfile-based), `releaseChannel` dist-tag support, and install with backup + rollback + restart-required. The announce-only 0.1.9 API (`check()`, `install()`, `isOlder`) is preserved. Client-level helpers `getUpdateStatus()`, `checkForUpdates()`, `installUpdate()`, `getUpdateHistory()` are restored as well.
+- **`useConsoleLogger` client option.** Setting `useConsoleLogger: true` on `ClientOptions` (or `PANINDIGAN_USE_CONSOLE_LOGGER=1`) swaps the internal logger for the built-in colorized console logger end-to-end — every component stops writing JSON to stdout. `createRootLogger` is now exported at the package root (the README already showed this import, but the export did not exist). The console logger gained level gates (`silent|fatal|error|warn|info|success|debug|verbose|trace`), a working `child({ module: "..." })` with suffixed names, and `success` at level 35 between info and warn.
+
+## Migration notes for 0.1.9 → 0.2.0
+
+- Existing `update.check()` / `update.install()` behavior is unchanged.
+- **Default behavior changed**: clients now check on startup and every 24h, and install automatically. To restore 0.1.9 announce-only behavior: `update: { autoInstall: false }`. To disable entirely: `update: { enabled: false }`.
+- `update.enabled: true` alone keeps the auto-check + auto-install behavior; it is no longer required as a master switch for anything (the default is already enabled).
+
+### Fixed
+
+- **26 TypeScript errors from the 0.2.0 development cycle** across `src/client/index.ts`, `src/transport/mqtt/index.ts`, and `src/update/index.ts` — including a duplicated connect block in the MQTT transport that shadowed the real implementation, a `UpdateChecker` wiring mismatch, and a dropped `isOlder` export on the `update` module (restored).
+- **The interim updater was re-assessed rather than kept as-shipped.** The automatic updater that briefly replaced the published announce-only checker was rewritten around explicit opt-ins (see Added): nothing auto-installs without `update.autoInstall: true`, publish workflows are not broken by a silent self-upgrade, and the 0.1.9 `isOlder` export is preserved.
+- **The MQTT duplicated connect block was removed** (a paste artifact that broke compilation).
+
+### Removed
+
+- The jQuery-style `x-requested-with: XMLHttpRequest` header.
+
+### Notes
+
+- **1357004 is server-side session rejection.** No header, no token rotation, and no client logic can revive it. Re-export fresh cookies from a browser that is actively logged in — on a confirmed-fresh export that still fails, the account is restricted.
+- **Anti-detection claims are unmeasured.** Nothing in this release has been verified against live Facebook; offline fixtures and source review only. The Stealth Guard's job is to stop the bot when risk signals appear — not to evade detection or checkpoints. Use an account you can afford to lose.
+- The `StealthConfig.antiDetection` doc comment now matches the actual default (`true`, updated since the initial draft of these notes).
+- **README was restored to the published 0.1.9 content** (the interim marketing rewrite was removed), with an added honest section on the Anti-Detection helpers and their actual (unmeasured, timing-only) effect.
+- **Automatic updates are enabled by default.** Every constructed client checks the registry on startup and every 24h, and installs newer published versions automatically (backup + rollback; restart required). Announce-only mode with `autoInstall: false`, or fully off with `enabled: false`. Be aware: an install requires a process restart to take effect, and a misconfigured registry or a compromised published version would propagate to all consumers — pin `update: { enabled: false }` if you need determinism.
 
 ## [0.1.9] - 2026-11-17
 

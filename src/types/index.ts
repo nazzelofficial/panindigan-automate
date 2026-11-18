@@ -135,6 +135,8 @@ export interface ClientOptions {
   readonly logLevel?: string | undefined;
   /** Pretty-print logs (requires `pino-pretty` installed). Default `false`. */
   readonly prettyPrint?: boolean | undefined;
+  /** Use the colorized console logger instead of pino for this client. Default false. */
+  readonly useConsoleLogger?: boolean | undefined;
   /** File path to mirror logs into. */
   readonly logFile?: string | undefined;
   /** Additional log transports receiving every record. */
@@ -209,12 +211,33 @@ export interface ClientOptions {
         readonly deviceStorePath?: string | undefined;
       }
     | undefined;
-  /** Update checker. Announce-only by default; install is an explicit call. */
+  /**
+   * Update checker. Automatic and on by default since 0.2.0 — a client
+   * constructed with no `update` options checks on startup and every 24h,
+   * and installs newer published versions automatically (backup + rollback;
+   * a process restart is required). Opt out with `enabled: false` (off) or `autoInstall: false` (notices only).
+   */
   readonly update?: {
-    /** Master switch. Default `false` — nothing checks without opt-in. */
+    /** Master switch. Default `true` — checks and installs automatically unless `false`. */
     readonly enabled?: boolean | undefined;
-    /** Minimum ms between registry checks. Default once per day. */
+    /** Check on startup. Default true. */
+    readonly checkOnStartup?: boolean | undefined;
+    /** Install automatically when an update is found. Default `true`. */
+    readonly autoInstall?: boolean | undefined;
+    /** Minimum ms between registry checks. Default 24h. */
     readonly checkIntervalMs?: number | undefined;
+    /** Alias of `checkIntervalMs` (accepted for convenience). */
+    readonly checkInterval?: number | undefined;
+    /** Package manager override. Auto-detected from the lockfile when unset. */
+    readonly packageManager?: "npm" | "pnpm" | "yarn" | undefined;
+    /** npm dist-tag to follow. Default `"latest"`. */
+    readonly releaseChannel?: string | undefined;
+    /** Registry request timeout in ms. Default 30000. */
+    readonly timeout?: number | undefined;
+    /** Restart the process after a successful install. Default `false`. */
+    readonly autoRestart?: boolean | undefined;
+    /** Allow installing prereleases. Default `false`. */
+    readonly allowPrerelease?: boolean | undefined;
   } | undefined;
 }
 

@@ -394,14 +394,20 @@ export class HttpTransport {
 
   /**
    * GET request. Query parameters are merged with the session defaults when
-   * `withDefaults` is not disabled.
+   * `withDefaults` is not disabled. For the home-page scrape pass
+   * `withDefaults: false` — Facebook serves the boot page (and its
+   * `fb_dtsg`/`lsd` payloads) to a plain cookie-only GET exactly like the
+   * real FCA login flow does.
    */
   async get(
     operation: string,
     url: string,
     options: RequestOptions = {},
   ): Promise<HttpResponse> {
-    const query = options.withDefaults === false ? (options.query ?? {}) : this.#mergeDefaults(options.query ?? {});
+    const query =
+      options.withDefaults === false
+        ? (options.query ?? {})
+        : this.#mergeDefaults(options.query ?? {});
     return this.#execute(operation, "GET", withQuery(url, query), {
       body: null,
       contentType: null,
@@ -636,18 +642,39 @@ export class HttpTransport {
     return merged;
   }
 
-  /** Builds the base headers for a request. */
-  #buildHeaders(url: URL, extra?: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  /**
+   * Builds the base headers for a request.
+   *
+   * The shape leans toward browser navigation rather than raw XHR: it
+   * accepts `text/html` first and carries the usual Chrome navigation
+   * client hints. Actively maintained FCA clients send a compatible set
+   * and are able to read the boot page from a plain root-page GET.
+   *
+   * NOTE — the `Accept` header is NOT what decides between the boot page
+   * and the `{"error":1357004}` envelope. Our own production deployment
+   * received the envelope while sending `Accept: text/html,…` (0.1.8 log).
+   * The decisive factor is the session itself: a rejected session gets the
+   * envelope on every shape of request, and no header set can revive it.
+   */
+  #buildHeaders(
+    url: URL,
+    extra?: Readonly<Record<string, string>> | undefined,
+  ): Record<string, string> {
     const headers: Record<string, string> = {
-      accept: "*/*",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,application/json;q=0.8,*/*;q=0.7",
       "accept-language": "en-US,en;q=0.9",
       origin: "https://www.facebook.com",
       referer: "https://www.facebook.com/",
       "sec-fetch-dest": "empty",
       "sec-fetch-mode": "cors",
       "sec-fetch-site": "same-origin",
+      "upgrade-insecure-requests": "1",
       "user-agent": this.#config.userAgent,
       "x-asbd-id": "359341",
+      "sec-ch-ua": '"Chromium";v="149", "Not;A=Brand";v="24", "Google Chrome";v="149"',
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": '"Windows"',
     };
     if (this.#tokens.region !== null) {
       headers["x-msgr-region"] = this.#tokens.region;

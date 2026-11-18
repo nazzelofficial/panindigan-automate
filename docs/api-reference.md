@@ -53,6 +53,7 @@ Creates a new `MessengerClient` instance.
 | `logLevel` | `string` | `"info"` | `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`, or `"silent"`. |
 | `logFile` | `string \| null` | `null` | Path to append structured log output. |
 | `prettyPrint` | `boolean` | `false` | Pretty-prints console log records (requires `pino-pretty`). |
+| `useConsoleLogger` | `boolean` | `false` | Swap pino for the built-in colorized console logger. Console mode writes to stdout only and secret redaction does **not** apply there — for local runs only. |
 | `logTransports` | `LogTransport[]` | `[]` | Additional log transports receiving every record. |
 | `httpProxy` | `string \| null` | `null` | HTTP or SOCKS5 proxy URL. Tunnels both HTTP and MQTT sockets. |
 | `httpTimeout` | `number` | `30000` | HTTP request timeout in milliseconds. |
@@ -73,7 +74,7 @@ Creates a new `MessengerClient` instance.
 | `stealth` | `Partial<StealthConfig>` | see below | Stealth Guard overrides. `{ enabled: false }` disables; `caps`, `limits`, `pacingEnabled`, `signalThreshold`, `signalWindow`, `cooldownMs`, `warmupDays`, `basePacingMs`, `jitterPercent`, `warmupEnabled`, `capWarningDelayMultiplier` are all adjustable. |
 | `dryRun` | `boolean` | `false` | Every outbound operation logs its payload summary; nothing reaches the network. |
 | `e2ee` | `"auto" \| "require" \| "off" \| { enabled?, require?, autoConnect?, selfListen?, deviceListCacheMs?, deviceStorePath? }` | `"off"` | E2EE for 1:1 threads (port of fbapi-unofficial, MIT). `"auto"` connects at login; `"require"` fails login without the encrypted channel; object form for fine-grained control. |
-| `update` | `{ enabled?, checkIntervalMs? }` | `{ enabled: false }` | Update checker. Announce-only; install is explicit. |
+| `update` | `{ enabled?, checkIntervalMs? }` | `{ enabled: true }` | Update checker. On by default: checks on startup and every 24h, and installs automatically; set `autoInstall: false` to keep announce-only, `enabled: false` to disable entirely. |
 
 Default stealth configuration:
 
@@ -538,13 +539,34 @@ Events: `e2ee_message` (incoming text), `e2ee_message_edit`, `e2ee_message_react
 
 ### `client.update`
 
-Announce-only until `update.enabled: true`, at most one registry hit per `checkIntervalMs` (default 24h).
+**Automatic and on by default since 0.2.0.** A client constructed with no `update` options checks the npm registry on startup and every 24 hours, and installs a newer published version automatically. Back the package up first and roll back on failure.
 
 ```ts
-const info = await client.update.check();      // null when disabled/too recent/up to date
+// Default behavior (do nothing):
+const client = new MessengerClient();   // checks on startup & every 24h; installs if newer exists
+// Disable automatic updates entirely:
+const client = new MessengerClient({ update: { enabled: false } });
+// Keep the notices but never auto-install (announce-only):
+const client = new MessengerClient({ update: { autoInstall: false } });
+```
+
+```ts
+const info = await client.update.check();      // announce-only; null when disabled/too recent/up to date
 if (info) console.log(`${info.current} → ${info.latest}`);
 const result = await client.update.install();  // explicit: plan → backup → install → rollback on failure
 ```
+
+Installation method options: `packageManager` (auto-detected from the lockfile when unset), `releaseChannel` (npm dist-tag, default `"latest"`), `timeout` (registry timeout ms, default 30s), `autoRestart` (default false — never restart for you), `allowPrerelease` (default false).
+
+`client.update.install()` and the automatic path both: back up `node_modules/panindigan-automate`, install the new version, and roll the backup back on any failure. **A process restart is required afterwards in both cases — automatic updates do not restart the bot.** If you run a long-lived process, restart it yourself (e.g. under a process manager) to pick up a new version.
+
+Status and history:
+
+- `update.getStatus()` — installed/latest versions, availability, install status, history (last 10)
+- `update.getHistory()` — the install history ring
+- `update.getLatestVersion()` — the cached latest version, if known
+- `update.stop()` — stops the periodic checker (the timer is unref'd; you only need this if you construct the checker yourself)
+- Client-level helpers: `getUpdateStatus()`, `getUpdateHistory()`, `checkForUpdates()`, `installUpdate()` — thin delegates to the above, returning status objects directly.
 
 `client.update.install()` requires a process restart; the caller decides when to restart.
 

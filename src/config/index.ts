@@ -24,6 +24,7 @@ export interface ResolvedConfig {
   readonly logLevel: string;
   readonly prettyPrint: boolean;
   readonly logFile: string | null;
+  readonly useConsoleLogger: boolean;
   readonly logTransports: readonly LogTransport[];
   readonly httpTimeout: number;
   readonly httpRetries: number;
@@ -47,6 +48,7 @@ const DEFAULTS = {
   logLevel: "info",
   prettyPrint: false,
   logFile: null,
+  useConsoleLogger: false,
   httpTimeout: 30_000,
   httpRetries: 3,
   httpMaxRedirects: 5,
@@ -74,6 +76,7 @@ const clientOptionsSchema = z
     logLevel: z.enum(LOG_LEVELS).optional(),
     prettyPrint: z.boolean().optional(),
     logFile: z.string().min(1).nullish(),
+    useConsoleLogger: z.boolean().optional(),
     httpTimeout: z.number().int().min(1_000).optional(),
     httpRetries: z.number().int().min(0).max(10).optional(),
     httpMaxRedirects: z.number().int().min(0).max(20).optional(),
@@ -170,6 +173,7 @@ function readEnvironment(): Record<string, unknown> {
   maybe("logLevel", envString(`${ENV_PREFIX}LOG_LEVEL`));
   maybe("prettyPrint", envBoolean(`${ENV_PREFIX}PRETTY_PRINT`));
   maybe("logFile", envString(`${ENV_PREFIX}LOG_FILE`));
+  maybe("useConsoleLogger", envBoolean(`${ENV_PREFIX}USE_CONSOLE_LOGGER`));
   maybe("httpTimeout", envNumber(`${ENV_PREFIX}HTTP_TIMEOUT`));
   maybe("httpRetries", envNumber(`${ENV_PREFIX}HTTP_RETRIES`));
   maybe("httpMaxRedirects", envNumber(`${ENV_PREFIX}HTTP_MAX_REDIRECTS`));
@@ -365,6 +369,7 @@ export function resolveConfig(options: ClientOptions = {}): ResolvedConfig {
     logLevel: validated.logLevel ?? DEFAULTS.logLevel,
     prettyPrint: validated.prettyPrint ?? DEFAULTS.prettyPrint,
     logFile: (validated.logFile as string | null | undefined) ?? null,
+    useConsoleLogger: validated.useConsoleLogger ?? DEFAULTS.useConsoleLogger,
     logTransports,
     httpTimeout: validated.httpTimeout ?? DEFAULTS.httpTimeout,
     httpRetries: validated.httpRetries ?? DEFAULTS.httpRetries,

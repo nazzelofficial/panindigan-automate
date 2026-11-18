@@ -397,8 +397,35 @@ export class CookieStore {
 
   /** Stores normalized cookies, replacing same-named entries. */
   setCookies(cookies: readonly NormalizedCookie[]): void {
+    const beforeCount = this.#jar.getCookiesSync(FACEBOOK_URL).length;
+    const inputCount = cookies.length;
+    
     for (const cookie of cookies) {
-      this.#jar.setCookieSync(toToughCookie(cookie), urlForCookie(cookie));
+      const toughCookie = toToughCookie(cookie);
+      const url = urlForCookie(cookie);
+      try {
+        this.#jar.setCookieSync(toughCookie, url);
+      } catch (err) {
+        // Explicit rejection (e.g., invalid domain, path)
+        console.warn(
+          `[panindigan-automate] Cookie explicitly rejected: ${cookie.name} for ${cookie.domain}`,
+          err instanceof Error ? err.message : String(err)
+        );
+      }
+    }
+    
+    const afterCount = this.#jar.getCookiesSync(FACEBOOK_URL).length;
+    const inserted = afterCount - beforeCount;
+    
+    // Detect silent rejections (tough-cookie prefixSecurity:'silent' behavior)
+    // Cookies with __Secure-/__Host- prefixes may be silently skipped
+    if (inserted < inputCount) {
+      const rejected = inputCount - inserted;
+      console.warn(
+        `[panindigan-automate] ${rejected} of ${inputCount} cookies were silently rejected by tough-cookie. ` +
+        `This usually means __Secure-/__Host- prefixed cookies lack required attributes (Secure, Path, Domain). ` +
+        `If authentication fails, export fresh cookies from an actively logged-in browser session.`
+      );
     }
   }
 
@@ -444,9 +471,20 @@ export class CookieStore {
    * Validates that `c_user`, `xs`, and `datr` are present and unexpired,
    * returning the user id. Throws `CookieError` otherwise — before any
    * network request is made.
+   * 
+   * Note: This validates cookie *format* only. A session can pass local
+   * validation but still be rejected by Facebook (error 1357004) when:
+   * - Account logged out elsewhere
+   * - Session revoked server-side
+   * - Cookies too old (even if not technically expired)
+   * 
+   * If you get AUTH_REFRESH_REQUIRED after this passes, you must export
+   * fresh cookies from an active browser session.
    */
   requireAuthenticated(): string {
     const cookies = new Map(this.#jar.getCookiesSync(FACEBOOK_URL).map((c) => [c.key, c]));
+    
+    // Check all required cookies present
     for (const required of REQUIRED_COOKIES) {
       const cookie = cookies.get(required);
       if (cookie === undefined) {
@@ -464,12 +502,27 @@ export class CookieStore {
         );
       }
     }
+    
     const userId = cookies.get("c_user")!.value;
     if (userId === "") {
       throw new CookieError('The "c_user" cookie is empty', "COOKIE_MISSING", {
         context: { cookie: "c_user" },
       });
     }
+    
+    // Warn about cookies nearing expiry (within 7 days)
+    const sevenDaysFromNow = Date.now() + (7 * 24 * 60 * 60 * 1000);
+    for (const required of REQUIRED_COOKIES) {
+      const cookie = cookies.get(required)!;
+      if (cookie.expires instanceof Date) {
+        const expiryTime = cookie.expires.getTime();
+        if (expiryTime > Date.now() && expiryTime < sevenDaysFromNow) {
+          const daysLeft = Math.floor((expiryTime - Date.now()) / (24 * 60 * 60 * 1000));
+          // This is logged by session manager, not thrown
+        }
+      }
+    }
+    
     return userId;
   }
 

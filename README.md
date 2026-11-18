@@ -382,6 +382,16 @@ await client.stealth.reset();
 
 **The guard never bypasses a checkpoint, never retries one, never "escalates" your behavior to avoid detection. It stops the bot. That is the whole job.**
 
+## Anti-Detection helpers (on by default)
+
+Enabled by default since 0.2.0; opt out with `stealth: { antiDetection: false }`. What it actually does:
+
+- **Randomized pre-send delay** — a uniform 50–200ms delay is applied before every outbound mutating operation.
+- **Staggered subscription timing** on MQTT connect (subscription order randomization and per-topic delays) via `MqttObfuscationManager`.
+- **Fingerprint API** — `client.getAntiDetectionFingerprint()` / `client.getHardwareDeviceId()` return a SHA-256 hash of the machine's CPU model, core count, primary MAC address, and hostname, formatted as a UUID. The hash is used **nowhere on the wire**; the connected client's UA and headers are unchanged.
+
+What it does **not** do: it does not rotate the User-Agent your requests send, it does not evade checkpoints or any Facebook anti-abuse mechanism, and its effect on restriction rates has not been measured. It is randomized timing plus a cosmetic fingerprint getter, not evasion technology — claims like "indistinguishable from human behavior" you may have seen elsewhere in marketing copy were removed as unprovable.
+
 ## E2EE (End-to-End Encryption, experimental)
 
 One-to-one Messenger **E2EE** (Signal Protocol + Noise XX transport) is built into this package. It is a faithful TypeScript port of [bhhoang/fbapi-unofficial](https://github.com/bhhoang/fbapi-unofficial)'s `src/e2ee/` (MIT), with per-file attribution in the source. It is **not** a from-scratch reimplementation, and we do not claim otherwise.
@@ -530,13 +540,19 @@ new MessengerClient({ logLevel: "debug", prettyPrint: true });
 
 `prettyPrint` loads pino-pretty dynamically and is ignored unless installed. Custom transports implement `LogTransport` and are passed via `logTransports`.
 
-For a colorized, human-first terminal view instead of JSON:
+For a colorized, human-first terminal view instead of JSON, pass `useConsoleLogger: true` to the client options:
+
+```ts
+const client = new MessengerClient({ useConsoleLogger: true });
+```
+
+This swaps the internal pino JSON logger for the built-in console logger — sections, badges, icons, and per-module `module:event` prefixes. Console mode writes to stdout only, and **secret redaction does not apply** in that mode — use it for local runs and keep the default pino logger when logs ship off-box or into an aggregator.
+
+If you build a custom logger tree instead of the built-in client one, `createRootLogger` is also exported at the package root:
 
 ```ts
 import { createRootLogger } from "panindigan-automate";
 ```
-
-or pass `createRootLogger({ useConsoleLogger: true })` wherever you build the logger — sections, badges, icons, and per-module connection/message indicators. Console mode writes to stdout only, and **secret redaction does not apply** in that mode — keep it for local runs; use the default pino logger when logs ship off-box. Details in [docs/console-logger.md](docs/console-logger.md).
 
 ## Diagnostics
 
@@ -572,13 +588,34 @@ Everything in [docs/api-reference.md](docs/api-reference.md): group create/parti
 
 ```ts
 const client = new MessengerClient({
-  update: { enabled: true }, // announce-only; checks at most once a day
+  update: { enabled: true }, // default since 0.2.0 — checks on startup and every 24h; installs automatically
 });
 
 const info = await client.update.check();
 if (info) console.log(`update available: ${info.current} → ${info.latest}`);
-// explicit, backed up, rolled back on failure; restart is yours:
+// explicit install (also what the automatic path does): backs up, rolls back on failure; restart is yours:
 // await client.update.install();
+```
+
+**Automatic updates are on by default since 0.2.0.** A client constructed with no `update` options checks the npm registry on startup and every 24 hours, and installs a newer published version automatically (with backup and rollback on failure; a process restart is required afterwards — automatic updates do not restart your bot).
+
+```ts
+const client = new MessengerClient({
+  update: { enabled: false },        // turn the checker off entirely
+  // or
+  update: { autoInstall: false },    // notices only; never install automatically
+});
+```
+
+Installation method options: `packageManager` (auto-detected from the lockfile when unset), `releaseChannel` (npm dist-tag, default `"latest"`), `timeout` (registry timeout ms, default 30s), `autoRestart` (default false — never restart for you), `allowPrerelease` (default false).
+
+Client-level convenience helpers (same behavior as `client.update.*`):
+
+```ts
+client.getUpdateStatus();   // installed/latest versions, availability, history
+client.getUpdateHistory();  // readonly UpdateHistory[] of the last installs
+await client.checkForUpdates();  // triggers a check now; installs automatically if autoInstall is set
+await client.installUpdate();    // installs the available update now
 ```
 
 ```bash
@@ -593,7 +630,7 @@ Wire-level facts about how this library talks to Messenger. These describe the i
 
 - **Realtime transport.** MQTT 3.1 (`MQIsdp`, protocol level 3) over WebSocket at `wss://edge-chat.facebook.com/chat?region=<region>&sid=<session>&cid=<client>`, or the regionless `wss://edge-chat.facebook.com/chat?sid=<session>&cid=<client>` when no region is known. The CONNECT username is the JSON session blob Messenger's web client sends (`u`, `s`, `chat_on`, `fg`, `d`, `ct: "websocket"`, `aid: "219994525426954"`, `mqtt_sid`, `cp: 3`, `ecp: 10`, `st: []`, `pm: []`, `dc`, `no_auto_fg: true`, `gas: null`, `pack: []`); topics are subscribed individually after CONNACK rather than embedded in `st`. When the account's region is unknown, connection attempts rotate through the `prn`, `pnb`, `vll`, `hkg`, `sin`, `ftw`, and `ash` region variants before giving up on a host, and the first region that succeeds is remembered for later reconnects.
 - **Sync stream.** After the connection is established, the client subscribes to 19 topics (including `/t_ms`, the delta stream, and the `/ls_req`/`/ls_resp` pair) and publishes a sync queue on `/messenger_sync_create_queue` — sync protocol version 11, `max_deltas_able_to_process` 100, `delta_batch_size` 500 — with `device_params: null` and, when a sequence id is already known, `initial_titan_sequence_id`. Reconnects that still hold a token use `/messenger_sync_get_diffs` instead. The first `/t_ms` reply carries `syncToken` and `firstDeltaSeqId`; later replies carry `lastIssuedSeqId`. A `/t_ms` whose `errorCode` is the string `ERROR_QUEUE_NOT_FOUND` or `ERROR_QUEUE_OVERFLOW` means the queue died: the cursor is cleared, a fresh sequence id is fetched, and a new queue is created on the same connection. A fresh connection that sees no `/t_ms` traffic within 5 seconds is treated as broken and cycled. `/foreground_state` and `/set_client_settings` are published after the queue is created; a graceful shutdown publishes `/browser_close` before the socket is closed.
-- **Login tokens.** `login()` loads `/home.php` and scrapes `fb_dtsg` from `DTSGInitialData`, `lsd` from `["LSD",[],{"token":"…"}]`, `clientID`, the MQTT region from the `irisSeqID`/`MqttWebConfig` endpoint payloads, and `iris_seq_id`; `jazoest` is derived as `"2"` plus the sum of the `fb_dtsg` character codes. With `validateOnLogin` (the default), `/chat/user_info/` is then posted for the authenticated id to confirm Facebook accepts the session, and `/ajax/presence/reconnect.php?reason=6` re-establishes the web client's presence session before the realtime connection is awaited.
+- **Login tokens.** `login()` loads the desktop root page (`/`) and scrapes `fb_dtsg` from `DTSGInitialData`, `lsd` from `["LSD",[],{"token":"…"}]`, `clientID`, the MQTT region from the `irisSeqID`/`MqttWebConfig` endpoint payloads, and `iris_seq_id`; `jazoest` is derived as `"2"` plus the sum of the `fb_dtsg` character codes. With `validateOnLogin` (the default), `/chat/user_info/` is then posted for the authenticated id to confirm Facebook accepts the session, and `/ajax/presence/reconnect.php?reason=6` re-establishes the web client's presence session before the realtime connection is awaited.
 - **Lightweight service.** Message edits and typing indicators are task-style requests published to `/ls_req` (application id `2220391788200892`) and correlated by request id on `/ls_resp`, with a 10-second default timeout.
 - **GraphQL.** Thread list, thread info, and message history go through `/api/graphql` with document id `3336396659757871` (batch `MessengerGraphQLThreadlistFetcher` — also the source of the sync sequence id), `3449967031715030` (batch `MessengerGraphQLThreadFetcher`), and `1498317363570230`. Reactions use document id `1491398900900362`; forced fetches of a single delta's full payload use `2848441488556444` with `thread_and_message_id`, the same document used for quoted-message lookups. Group creation uses `577041672419534` at `/api/graphql/`; thread themes use `1727493033983591` at `/api/graphqlbatch/`. `/api/graphqlbatch/` replies are a sequence of concatenated JSON objects plus a summary object, not a JSON array.
 - **Mercury.** Sends and thread mutations use the classic form-encoded `/messaging/send/`-family endpoints with a rotating `fb_dtsg` token; attachments upload to Facebook's upload host first. Group sends set `thread_fbid`; 1:1 sends set `specific_to_list[0]`/`specific_to_list[1]` and `other_user_fbid`. The thread kind comes from the client's cache, from a thread-info lookup for ambiguous 15-character ids, and otherwise from the web client's length heuristic. Group membership is a `log:subscribe` log message; removals go to `/chat/remove_participants`. Group photo changes upload first, then post `thread_image_id` to `/messaging/set_thread_image/`.
