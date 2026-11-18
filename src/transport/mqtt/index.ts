@@ -593,8 +593,9 @@ export class MqttTransport {
         return;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        this.#logger.debug(
-          { region: region ?? "default", err: lastError.message },
+        const withCause = error instanceof Error && (error as { cause?: unknown }).cause;
+        this.#logger.warn(
+          { region: region ?? "default", err: lastError.message, ...(withCause !== undefined ? { cause: String(withCause) } : {}) },
           "MQTT dial failed",
         );
       }

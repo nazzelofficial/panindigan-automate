@@ -107,7 +107,7 @@ describe("automatic update checker (stubbed registry)", () => {
     );
     const storage = new MemoryStorage();
     const checker = new UpdateChecker({
-      options: { enabled: true },
+      options: { enabled: true, autoInstall: false },
       logger: silent(),
       storage,
       version: "0.0.1",
@@ -146,6 +146,46 @@ describe("automatic update checker (stubbed registry)", () => {
     expect(result.latestVersion).toBe("9.9.9-rc.1");
   });
 
+  it("checks the registry on client construction when enabled (default)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        registryResponse({
+          name: "panindigan-automate",
+          version: "9.9.9",
+          dist: { tarball: "https://example.invalid/x.tgz" },
+          time: { "9.9.9": "2026-11-18T00:00:00.000Z" },
+        }),
+      ),
+    );
+
+    const { MessengerClient } = await import("../src/index.js");
+    const client = new MessengerClient({ update: { autoInstall: false } });
+
+    for (let i = 0; i < 100; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      if (client.getUpdateStatus()?.installationStatus === "available") break;
+    }
+
+    const status = client.getUpdateStatus();
+    expect(status?.installationStatus).toBe("available");
+    expect(status?.latestVersion).toBe("9.9.9");
+    client.update.stop();
+  });
+
+  it("makes no network call when the user sets update.enabled=false", async () => {
+    const fetchMock = vi.fn(async () =>
+      registryResponse({ version: "9.9.9", dist: {}, time: {} }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { MessengerClient } = await import("../src/index.js");
+    new MessengerClient({ update: { enabled: false } });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("reports up-to-date when the installed version is newer", async () => {
     vi.stubGlobal(
       "fetch",
@@ -160,7 +200,7 @@ describe("automatic update checker (stubbed registry)", () => {
     );
     const storage = new MemoryStorage();
     const checker = new UpdateChecker({
-      options: { enabled: true },
+      options: { enabled: true, autoInstall: false },
       logger: silent(),
       storage,
       version: "9.9.9",

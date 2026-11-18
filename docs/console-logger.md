@@ -27,7 +27,7 @@ const logger = createRootLogger({
   useConsoleLogger: true,
 });
 
-logger.startupBanner("0.2.2");
+logger.startupBanner("0.2.3");
 logger.features([
   { name: "HTTP Transport", status: "enabled" },
   { name: "MQTT Realtime", status: "enabled" },

@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.3] - 2026-11-18
+
+Patch release on top of the published 0.2.2. MQTT region extraction robustness fixes and visibility into why Facebook refuses the socket.
+
+### Fixed
+
+- **Region extraction no longer returns `null` just because the boot payload format drifted.** In addition to the three historical patterns (`irisSeqID`, JSON `app_id`/`endpoint`/`iris_seq_id`, `MqttWebConfig`-quoted), extraction now also scans the first 8 KB after the `MqttWebConfig` marker for a `region` key, for an `endpoint` carrying `?region=`, and tolerates key re-ordering, whitespace and JS-escaped slashes — key shapes seen on the 2026 home page. The deployment had `region: null` because its 4.3 MB boot page carried the config but did not match any of the rigid historical patterns; better to parse what is actually served.
+- **Per-region MQTT dial failures are now warned at info level with the underlying error**, instead of hidden at `debug`. The previous deployment produced "could not connect to any MQTT region: MQTT connection closed before CONNACK" with no reason visible because per-region reasons logged at debug and the default level was info. Each attempt now logs its name and its failure reason.
+- **Client construction now initializes the automatic update checker.** Previously the checker was created only when `client.update` was accessed — the Messenger userbot never reads `client.update`, so no registry check or install ever ran. The checker is now constructed and started inside the constructor; `client.update` returns the same initialized instance. (`update.enabled: false` still fully disables it and the registry is never touched.)
+
+### Risks worth knowing before the next redeploy
+
+- **Automatic installs by default.** With `update.enabled: true` (the default) and `autoInstall: true` (the default since 0.2.0), every client construction starts the updater — restart of the bot will also run `pnpm add panindigan-automate@latest` inside the container. The installed version takes effect only on the next process restart; Render's ephemeral container makes the in-memory process untouched until the container itself redeploys. The log lines ("Update installed successfully — restart required") tell you when it happened.
+- **If the Render container lacks `pnpm` on `PATH`, auto-install fails silently atwarn level** ("Package manager pnpm not available") and nothing is installed. The check still happens, so you will know what the latest published version is — just not that you will get it until you redeploy with a fresh lockfile. Pin `update: { enabled: false }` if you prefer to control dependency versions entirely through the bot's lockfile.
+- **The updater never restarts your process.** If the bot is running, it stays on the old code until you restart/redeploy it yourself.
+
+### Notes
+
+- **This does not un-block a session whose socket is silently dropped by Facebook.** If every region attempts fails with the same pre-CONNACK close, the deciding party is the account/session/device/IP combination — not this library's dial logic. The new log lines will make the per-region cause explicit; if they all show the same silent close, the session is being dropped at the transport layer, and re-exporting cookies or appealing the account restriction is the only path.
+
 ## [0.2.2] - 2026-11-18
 
 Patch release on top of the published 0.2.1. Fixes a false-positive login rejection triggered by substring matching against the whole app shell.

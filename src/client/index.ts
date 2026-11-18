@@ -233,7 +233,20 @@ function extractRegion(html: string): string | null {
       return region[1].toLowerCase();
     }
   }
-  const direct = html.match(/"region":"([a-z0-9]{2,4})"/i);
+  // Modern fallback: scan the region window after the MqttWebConfig marker for
+  // the region key — tolerant to key order, whitespace, and JS-escaped slashes.
+  const marker = html.indexOf("MqttWebConfig");
+  if (marker !== -1) {
+    const window = html.slice(marker, marker + 8192);
+    const regionMatch = window.match(/"region"\s*:\s*"([A-Za-z0-9]{2,4})"/);
+    if (regionMatch?.[1]) return regionMatch[1].toLowerCase();
+    const endpointMatch = window.match(/"endpoint"\s*:\s*"([^"]+)"/);
+    if (endpointMatch?.[1]) {
+      const region = endpointMatch[1].match(/region=([a-z0-9]+)/i);
+      if (region?.[1]) return region[1].toLowerCase();
+    }
+  }
+  const direct = html.match(/"region":"([A-Za-z0-9]{2,4})"/i);
   return direct?.[1]?.toLowerCase() ?? null;
 }
 
@@ -718,6 +731,11 @@ export class MessengerClient {
     this.#e2eeConfig = resolveE2EEOptions(options.e2ee, this.#config.storageDirectory);
     this.#diagnostics.setExternalProvider(() => this.#externalStats());
 
+    // Start the update checker with the process — the Messenger userbot
+    // does not access `client.update` explicitly, so initialization must
+    // happen here, not on getter access.
+    void this.#ensureUpdateChecker();
+
     // F4 — opt-in crash report. Disabled unless PANINDIGAN_DEBUG=1.
     if (process.env.PANINDIGAN_DEBUG === "1") {
       process.once("uncaughtException", (error) => {
@@ -925,7 +943,8 @@ export class MessengerClient {
    * startup and every 24h, installs automatically. Opt out with
    * `update: { enabled: false }` (off) or `autoInstall: false` (notices only).
    */
-  get update(): UpdateChecker {
+  /** Build and initialize the update checker exactly once. */
+  #ensureUpdateChecker(): UpdateChecker {
     if (this.#updateChecker === null) {
       const checker = new UpdateChecker({
         options: this.#updateOptions,
@@ -935,8 +954,9 @@ export class MessengerClient {
       });
       this.#updateChecker = checker;
 
-      // Enabled by default — every constructed client starts its checker
-      // unless update.enabled === false is explicitly set.
+      // Constructing the client starts the checker — the Messenger
+      // userbot never reads `client.update` explicitly, so waiting for a
+      // getter access would mean the registry check never ever ran.
       if (this.#updateOptions?.enabled !== false) {
         void checker.initialize().catch((error) => {
           this.#logger.warn(
@@ -947,6 +967,10 @@ export class MessengerClient {
       }
     }
     return this.#updateChecker;
+  }
+
+  get update(): UpdateChecker {
+    return this.#ensureUpdateChecker();
   }
 
   // -------------------------------------------------------------------------
