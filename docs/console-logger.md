@@ -1,6 +1,6 @@
 # Console Logger
 
-An opt-in, colorized terminal logger is built into this package. It swaps the default pino JSON logger for a sectioned console output (rich colors, box drawing, icons, connection/message indicators) with the same call-site contract (`logger.info`/`warn`/`error`/`debug`).
+Colorized logging for local development. Production keeps the default redacted JSON. Two modes: `prettyPrint: true` colorizes the pino records (built-in colorizer, no dependency needed), and `useConsoleLogger: true` swaps pino for the richer sectioned console logger.
 
 ## Enabling it (as a client option)
 
@@ -27,7 +27,7 @@ const logger = createRootLogger({
   useConsoleLogger: true,
 });
 
-logger.startupBanner("0.2.5");
+logger.startupBanner("0.2.6");
 logger.features([
   { name: "HTTP Transport", status: "enabled" },
   { name: "MQTT Realtime", status: "enabled" },

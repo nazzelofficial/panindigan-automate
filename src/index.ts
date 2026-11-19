@@ -32,10 +32,11 @@ export type {
   RequestTokens,
   UploadFile,
 } from "./transport/http/index.js";
-export { MqttTransport } from "./transport/mqtt/index.js";
+export { MqttTransport, formatMqttDiagnostic, sanitizeMqttDiagnosticText, isValidMqttWsUrl } from "./transport/mqtt/index.js";
 export type {
   ConnectionLostInfo,
   LsTaskSpec,
+  MqttDialDiagnostic,
   MqttTransportCallbacks,
   MqttTransportDeps,
   PublishOptions,
@@ -51,7 +52,7 @@ export { PluginManager } from "./plugins/index.js";
 export type { PluginState, PluginView } from "./plugins/index.js";
 
 // Logger — pino JSON by default; opt-in console logger (LogTransport re-exported via types)
-export { createRootLogger } from "./logger/index.js";
+export { createRootLogger, ColorizedDestination } from "./logger/index.js";
 export type { Logger, LogLevel, LoggerOptions } from "./logger/index.js";
 export { TypedEmitter } from "./events/index.js";
 export { DiagnosticsCollector } from "./diagnostics/index.js";

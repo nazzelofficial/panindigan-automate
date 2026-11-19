@@ -379,11 +379,14 @@ export function safeHomeDiagnostics(
   url: string,
   status: number,
 ): HomePageDiagnostics {
-  let path = "unknown";
+  let path = "none";
   try {
     path = new URL(url).pathname;
   } catch {
-    // Keep the pathname fallback readable and value-free.
+    // Unparseable URL — report the literal input instead of a vague "unknown".
+    // It is value-free (no query string, no credentials) because we only keep
+    // the part before any "?" and truncate it.
+    path = url.split("?")[0]?.slice(0, 120) || "none";
   }
 
   return {
@@ -635,7 +638,7 @@ export class MessengerClient {
         this.#emitter.emitAndForget("checkpoint", {
           type: "checkpoint",
           timestamp: Date.now(),
-          operation: typeof signal.context["operation"] === "string" ? (signal.context["operation"] as string) : "unknown",
+          operation: typeof signal.context["operation"] === "string" ? (signal.context["operation"] as string) : "unattributed",
           code: signal.code,
           detail: signal.message,
         });
@@ -1028,11 +1031,23 @@ export class MessengerClient {
     this.#readyResolve = resolveReady;
     this.#readyReject = rejectReady;
 
+    // Declared before the timeout so the delayed callback can never touch a
+    // variable still in its temporal dead zone if setup throws mid-way.
+    let mqttRef: MqttTransport | null = null;
     const timeout = setTimeout(() => {
+      // Include the last MQTT dial diagnostic so the timeout carries the real
+      // failing stage (upgrade status, close code, CONNACK code) instead of a
+      // bare "Timed out" with no cause.
+      const dial = mqttRef?.lastDialDiagnostic;
       this.#readyReject?.(
         new TimeoutError("Timed out waiting for the Messenger realtime connection", {
           retryable: true,
-          context: { operation: "login" },
+          context: {
+            operation: "login",
+            ...(dial !== null && dial !== undefined
+              ? { mqtt: dial as unknown as Record<string, unknown> }
+              : {}),
+          },
         }),
       );
     }, LOGIN_SYNC_TIMEOUT_MS);
@@ -1119,6 +1134,7 @@ export class MessengerClient {
       },
     });
     this.#mqtt = mqtt;
+    mqttRef = mqtt;
     this.#delta = new DeltaProcessor({
       selfUserId: prepared.userId,
       logger: this.#logger,
@@ -1127,8 +1143,12 @@ export class MessengerClient {
     });
 
     try {
-      await mqtt.connect();
-      await ready;
+      // Both promises must be observed from the same moment. Previously the
+      // code awaited `mqtt.connect()` first, so the 30s timeout could reject
+      // `ready` while it had no rejection handler attached — surfacing as an
+      // "Unhandled rejection - Timed out waiting for the Messenger realtime
+      // connection" in production. Promise.all attaches handlers to both.
+      await Promise.all([mqtt.connect(), ready]);
     } finally {
       clearTimeout(timeout);
       this.#readyResolve = null;
@@ -2691,7 +2711,7 @@ export class MessengerClient {
     }
     void this.#stealth.recordSignal({
       ...signal,
-      context: { ...signal.context, operation: operation ?? "unknown" },
+      context: { ...signal.context, operation: operation ?? "unattributed" },
     });
   }
 

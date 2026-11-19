@@ -111,6 +111,99 @@ export interface SyncCursor {
   readonly syncToken: string | null;
 }
 
+/**
+ * Structured, protocol-level MQTT dial diagnostic.
+ *
+ * Every field that was not actually observed is `null` — never guessed,
+ * never derived from error-message parsing. `stage` identifies the last
+ * observably reached stage so an immediate upgrade rejection is not
+ * misreported as a CONNACK or network timeout.
+ */
+export interface MqttDialDiagnostic {
+  readonly stage:
+    | "url-build"
+    | "websocket-create"
+    | "websocket-upgrade"
+    | "websocket-open"
+    | "mqtt-connect-sent"
+    | "mqtt-connack"
+    | "websocket-close"
+    | "socket-error"
+    | "connack-timeout"
+    | "connected";
+  readonly region: string;
+  readonly attempt: number;
+  readonly connectionId: string;
+  readonly elapsedMs: number;
+  readonly upgradeStatus: number | null;
+  readonly upgradeStatusText: string | null;
+  readonly wsCloseCode: number | null;
+  readonly wsCloseReason: string | null;
+  readonly socketErrorCode: string | null;
+  readonly socketErrorMessage: string | null;
+  readonly mqttPacketType: string | null;
+  readonly mqttReturnCode: number | null;
+  readonly handshakeHeaders: Readonly<Record<string, string>>;
+}
+
+/** Format a dial diagnostic into a single structured line for logs/errors. */
+export function formatMqttDiagnostic(d: MqttDialDiagnostic): string {
+  const part = (key: string, value: string | number | null): string | null =>
+    value === null ? null : `${key}=${value}`;
+  return [
+    `stage=${d.stage}`,
+    `region=${d.region}`,
+    `elapsedMs=${d.elapsedMs}`,
+    part("upgradeStatus", d.upgradeStatus),
+    part("upgradeStatusText", d.upgradeStatusText),
+    part("wsCloseCode", d.wsCloseCode),
+    part("wsCloseReason", d.wsCloseReason),
+    part("socketErrorCode", d.socketErrorCode),
+    part("socketErrorMessage", d.socketErrorMessage),
+    part("mqttPacketType", d.mqttPacketType),
+    part("mqttReturnCode", d.mqttReturnCode),
+    `attempt=${d.attempt}`,
+    `connectionId=${d.connectionId}`,
+  ].filter((value): value is string => value !== null).join(" ");
+}
+
+/**
+ * Safe header names for diagnostics. Values are REDACTED — a Cookie header
+ * or any authentication material must never be logged, not even in debug.
+ */
+const SAFE_DIAGNOSTIC_HEADERS = ["Origin", "Referer", "User-Agent", "Host"] as const;
+function safeHandshakeHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const name of SAFE_DIAGNOSTIC_HEADERS) {
+    if (typeof headers[name] === "string") out[name.toLowerCase()] = "[present]";
+  }
+  if (typeof headers["Cookie"] === "string") out["cookie"] = "[REDACTED]";
+  return out;
+}
+
+/**
+ * Sanitizes free-text fields from socket/WebSocket errors before they become
+ * diagnostic values. These strings come from external sources and could carry
+ * a URL query string (sid/cid) or a cookie fragment; neither belongs in logs.
+ */
+export function sanitizeMqttDiagnosticText(value: unknown, maxLength = 200): string | null {
+  if (typeof value !== "string" || value === "") return null;
+  let text = value.replace(/[\r\n\t]+/g, " ").slice(0, maxLength);
+  text = text.replace(/[?&](?:sid|cid|region|token|fb_dtsg|jazoest|xs|datr|c_user)=[^\s&]*/gi, "?[REDACTED]");
+  text = text.replace(/(c_user|xs|datr|dbln|fb_dtsg|jazoest|token)\s*[=:]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+  return text;
+}
+
+/** Validates a constructed MQTT WebSocket URL before any socket is opened. */
+export function isValidMqttWsUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "wss:" && parsed.hostname.length > 0 && !value.includes("\n");
+  } catch {
+    return false;
+  }
+}
+
 /** Fired once the sync channel is up: the first `/t_ms` arrived. */
 export interface SyncEstablishedInfo {
   /** Whether this is a re-establishment after a drop. */
@@ -265,6 +358,8 @@ export class MqttTransport {
   #client: MqttClient | null = null;
   /** Bumped on every dial; stale handlers compare against it. */
   #generation = 0;
+  /** Diagnostic for the in-flight dial; replaced on every attempt. */
+  #dialDiagnostic: MqttDialDiagnostic | null = null;
   #reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   #attempt = 0;
@@ -313,7 +408,12 @@ export class MqttTransport {
     return this.#client !== null;
   }
 
-  /** Whether the sync channel is up on the current connection. */
+  /** The diagnostic for the most recent dial attempt, or null before any. */
+  get lastDialDiagnostic(): MqttDialDiagnostic | null {
+    return this.#dialDiagnostic === null ? null : { ...this.#dialDiagnostic };
+  }
+
+  /** Whether a sync channel is up on the current connection. */
   get syncEstablished(): boolean {
     return this.#syncEstablishedOnConnection;
   }
@@ -600,9 +700,13 @@ export class MqttTransport {
         return;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
-        const withCause = error instanceof Error && (error as { cause?: unknown }).cause;
+        const diag = (error as { context?: unknown }).context;
         this.#logger.warn(
-          { region: region ?? "default", err: lastError.message, ...(withCause !== undefined ? { cause: String(withCause) } : {}) },
+          {
+            region: region ?? "default",
+            err: lastError.message,
+            ...(diag !== undefined && diag !== null && typeof diag === "object" ? diag as Record<string, unknown> : {}),
+          },
           "MQTT dial failed",
         );
       }
@@ -652,8 +756,45 @@ export class MqttTransport {
   #dial(region: string | null): Promise<void> {
     return new Promise<void>(async (resolve, reject) => {
       const generation = ++this.#generation;
+      const dialStartedAt = Date.now();
+      const connectionId = `${generation}-${randomUUID().slice(0, 8)}`;
+      const regionName = region ?? (this.#deps.mqttEndpoint !== undefined && this.#deps.mqttEndpoint !== "" ? "custom" : "default");
+      let diagnostic: MqttDialDiagnostic = {
+        stage: "url-build",
+        region: regionName,
+        attempt: this.#attempt + 1,
+        connectionId,
+        elapsedMs: 0,
+        upgradeStatus: null,
+        upgradeStatusText: null,
+        wsCloseCode: null,
+        wsCloseReason: null,
+        socketErrorCode: null,
+        socketErrorMessage: null,
+        mqttPacketType: null,
+        mqttReturnCode: null,
+        handshakeHeaders: {},
+      };
+      const advance = (stage: MqttDialDiagnostic["stage"], patch: Partial<MqttDialDiagnostic> = {}): void => {
+        diagnostic = {
+          ...diagnostic,
+          ...patch,
+          stage,
+          elapsedMs: Date.now() - dialStartedAt,
+        };
+        this.#dialDiagnostic = diagnostic;
+      };
       const sessionId = Math.floor(Math.random() * MAX_SESSION_ID) + 1;
       const url = this.#buildUrl(region, sessionId);
+      if (!isValidMqttWsUrl(url)) {
+        const error = new MQTTError(`invalid MQTT WebSocket URL for region ${regionName}`, "MQTT_CONNECTION_FAILED", {
+          retryable: false,
+          context: { region: regionName },
+        });
+        advance("url-build");
+        reject(error);
+        return;
+      }
       const cookieHeader = this.#deps.cookies.headerFor(FB_BASE_URL);
 
       // The connect username carries the classic payload shape. `st` is
@@ -698,6 +839,7 @@ export class MqttTransport {
               agent: createWsProxyAgent(proxy, { timeoutMs: MQTT_CONNECT_TIMEOUT_MS }),
             };
 
+      advance("websocket-create", { handshakeHeaders: safeHandshakeHeaders(headers) });
       const options: IClientOptions = {
         clientId: "mqttwsclient",
         protocolId: "MQIsdp",
@@ -710,15 +852,50 @@ export class MqttTransport {
         // The transport owns reconnection; never let mqtt.js retry on its own.
         reconnectPeriod: 0,
         wsOptions,
-        // Override WebSocket creation to force the 'mqtt' sub-protocol.
-        // mqtt.js v5 automatically sends 'mqttv3.1' when protocolId is
-        // 'MQIsdp' + protocolVersion 3, but Facebook's edge-chat broker
-        // negotiates the standard 'mqtt' WebSocket sub-protocol regardless
-        // of the MQTT wire-level protocol version in the CONNECT packet.
-        // Sending 'mqttv3.1' causes the server to close the connection
-        // before CONNACK because the sub-protocol negotiation fails.
+        // The actively-maintained FCA reference creates the socket through
+        // `websocket-stream(host, wsOptions)` — with NO Sec-WebSocket-Protocol
+        // header. mqtt.js's default builder always adds one. Both earlier
+        // variants ("mqttv3.1" forced, then "mqtt" forced) were rejected
+        // before CONNACK, so send no protocol, matching the reference while
+        // keeping the MQIsdp/3 CONNECT packet. This is an attempt — not proof
+        // that MQTT now works; the structured diagnostic below reports the
+        // exact stage if it fails again.
         createWebsocket: (wsUrl: string, _protocols: string[], wsOpts: IClientOptions) => {
-          return new WebSocket(wsUrl, ["mqtt"], wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+          const socket = new WebSocket(wsUrl, undefined, wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void }).on("upgrade", (response: unknown) => {
+            const res = response as { statusCode?: unknown; statusMessage?: unknown };
+            advance("websocket-upgrade", {
+              upgradeStatus: typeof res.statusCode === "number" ? res.statusCode : null,
+              upgradeStatusText: sanitizeMqttDiagnosticText(res.statusMessage),
+            });
+          });
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void })
+            .on("unexpected-response", (_req: unknown, res: unknown) => {
+              const response = res as { statusCode?: unknown; statusMessage?: unknown } | null;
+              advance("websocket-upgrade", {
+                upgradeStatus: typeof response?.statusCode === "number" ? response.statusCode : null,
+                upgradeStatusText: sanitizeMqttDiagnosticText(response?.statusMessage),
+              });
+            });
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void })
+            .on("open", () => advance("websocket-open"));
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void })
+            .on("error", (error: unknown) => {
+              const err = error as { code?: unknown; message?: unknown } | null;
+              advance("socket-error", {
+                socketErrorCode: typeof err?.code === "string" ? err.code : null,
+                socketErrorMessage: sanitizeMqttDiagnosticText(err?.message),
+              });
+            });
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void })
+            .on("close", (code: unknown, reason: unknown) => {
+              const raw = reason instanceof Buffer ? reason.toString("utf8") : reason;
+              advance("websocket-close", {
+                wsCloseCode: typeof code === "number" ? code : null,
+                wsCloseReason: sanitizeMqttDiagnosticText(raw),
+              });
+            });
+          return socket;
         },
       };
 
@@ -749,11 +926,43 @@ export class MqttTransport {
       }
 
       let settled = false;
+      const fail = (original: Error | null): void => {
+        // Build the message from OBSERVED fields only; no field is invented.
+        const detail = formatMqttDiagnostic(diagnostic);
+        const suffix = original instanceof Error && original.message ? `: ${original.message.slice(0, 200)}` : "";
+        settle(
+          new MQTTError(`MQTT connection failed: ${detail}${suffix}`, "MQTT_CONNECTION_FAILED", {
+            retryable: true,
+            context: diagnostic as unknown as Record<string, unknown>,
+            ...(original instanceof Error ? { cause: original } : {}),
+          }),
+        );
+      };
       const settle = (error?: Error): void => {
         if (settled) return;
         settled = true;
+        client.removeListener("packetsend", onPacketSend);
+        client.removeListener("packetreceive", onPacketReceive);
         if (error !== undefined) reject(error);
-        else resolve();
+        else {
+          advance("connected");
+          resolve();
+        }
+      };
+
+      const onPacketSend = (packet: { cmd?: string }): void => {
+        if (packet?.cmd === "connect") {
+          advance("mqtt-connect-sent", { mqttPacketType: packet.cmd });
+        }
+      };
+      const onPacketReceive = (packet: { cmd?: string; returnCode?: number; reasonCode?: number }): void => {
+        if (packet?.cmd === "connack") {
+          const code = typeof packet.returnCode === "number" ? packet.returnCode : packet.reasonCode;
+          advance("mqtt-connack", {
+            mqttPacketType: packet.cmd,
+            mqttReturnCode: typeof code === "number" ? code : null,
+          });
+        }
       };
 
       const onConnect = (): void => {
@@ -762,40 +971,26 @@ export class MqttTransport {
         // A close during post-CONNACK setup must settle the dial so the
         // region sweep can move on.
         client.once("close", () =>
-          settle(
-            new MQTTError("MQTT connection closed during setup", "MQTT_CONNECTION_FAILED", {
-              retryable: true,
-            }),
-          ),
+          fail(new MQTTError("connection closed during setup", "MQTT_CONNECTION_FAILED", { retryable: true })),
         );
         void this.#onConnack(client, generation).then(
           () => settle(),
           (error: unknown) => {
             this.#forceEnd(client);
-            settle(
-              error instanceof Error
-                ? error
-                : new MQTTError(String(error), "MQTT_CONNECTION_FAILED", { retryable: true }),
-            );
+            fail(error instanceof Error ? error : new Error(String(error)));
           },
         );
       };
-      const onConnectError = (error: Error): void => {
-        settle(
-          new MQTTError(`MQTT connection failed: ${error.message}`, "MQTT_CONNECTION_FAILED", {
-            retryable: true,
-            cause: error,
-          }),
-        );
-      };
+      const onConnectError = (error: Error): void => fail(error);
       const onConnectClosed = (): void => {
-        settle(
-          new MQTTError("MQTT connection closed before CONNACK", "MQTT_CONNECTION_FAILED", {
-            retryable: true,
-          }),
-        );
+        // If a CONNACK was received, the rejection is protocol-level, not a
+        // generic pre-CONNACK close. Otherwise preserve the last observed
+        // WebSocket/socket stage captured above.
+        fail(null);
       };
 
+      client.on("packetsend", onPacketSend);
+      client.on("packetreceive", onPacketReceive);
       client.once("connect", onConnect);
       client.once("error", onConnectError);
       client.once("close", onConnectClosed);

@@ -540,15 +540,28 @@ new MessengerClient({ logLevel: "debug", prettyPrint: true });
 
 `prettyPrint` loads pino-pretty dynamically and is ignored unless installed. Custom transports implement `LogTransport` and are passed via `logTransports`.
 
-For a colorized, human-first terminal view instead of JSON, pass `useConsoleLogger: true` to the client options:
+### Logging: local development vs production
+
+**Production / deployment (default):** structured JSON on stdout, with cookies, tokens and credentials redacted at every level. Ship these logs to an aggregator as-is.
 
 ```ts
-const client = new MessengerClient({ useConsoleLogger: true });
+const client = new MessengerClient(); // default: redacted JSON
 ```
 
-This swaps the internal pino JSON logger for the built-in console logger — sections, badges, icons, and per-module `module:event` prefixes. Console mode writes to stdout only, and **secret redaction does not apply** in that mode — use it for local runs and keep the default pino logger when logs ship off-box or into an aggregator.
+**Local development (localhost):** colorized, human-readable output. Two options:
 
-If you build a custom logger tree instead of the built-in client one, `createRootLogger` is also exported at the package root:
+```ts
+// Option 1 — pretty-print the same redacted pino logs (recommended):
+const client = new MessengerClient({ prettyPrint: true });
+
+// Option 2 — the richer console logger with banners, icons and indicators.
+// NOTE: no secret redaction in this mode — local use only.
+const client2 = new MessengerClient({ useConsoleLogger: true });
+```
+
+`prettyPrint: true` produces colorized output with **no extra dependency**: it uses `pino-pretty` when installed locally, otherwise a built-in colorizer. The `logFile` and `logTransports` options still receive the same records at the same time. `pino-pretty` is a local-development tool — do not enable it in production; keep the default JSON there.
+
+If you build a custom logger tree, `createRootLogger` is also exported at the package root:
 
 ```ts
 import { createRootLogger } from "panindigan-automate";

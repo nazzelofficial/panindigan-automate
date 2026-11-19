@@ -67,9 +67,9 @@ describe("safeHomeDiagnostics", () => {
     expect(diag.hasCheckpoint).toBe(true);
   });
 
-  it("keeps an unknown path when the URL cannot be parsed", () => {
+  it("reports the literal URL when it cannot be parsed (no vague 'unknown')", () => {
     const diag = safeHomeDiagnostics(UNKNOWN_PAGE, "not a url", 200);
-    expect(diag.path).toBe("unknown");
+    expect(diag.path).toBe("not a url");
   });
 });
 

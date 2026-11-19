@@ -59,6 +59,9 @@ const cookieEntrySchema = z.object({
   domain: z.string().min(1).optional(),
   path: z.string().optional(),
   expires: z.union([z.string(), z.number()]).optional(),
+  /** Mobile exports commonly use Puppeteer-style seconds since epoch. */
+  expirationDate: z.number().optional(),
+  hostOnly: z.boolean().optional(),
   httpOnly: z.boolean().optional(),
   secure: z.boolean().optional(),
   sameSite: z.string().optional(),
@@ -93,7 +96,7 @@ function normalizeSameSite(value: string | undefined): "strict" | "lax" | "none"
   if (value === undefined) {
     return undefined;
   }
-  const normalized = value.trim().toLowerCase();
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
   switch (normalized) {
     case "strict":
       return "strict";
@@ -102,6 +105,7 @@ function normalizeSameSite(value: string | undefined): "strict" | "lax" | "none"
     case "none":
     case "no_restriction":
     case "no_restriction_unspecified":
+    case "unspecified":
       return "none";
     default:
       return undefined;
@@ -147,7 +151,9 @@ function fromAppStateEntry(entry: z.infer<typeof appStateEntrySchema>): Normaliz
 /** Builds a normalized cookie from a cookie-array entry. */
 function fromCookieEntry(entry: z.infer<typeof cookieEntrySchema>): NormalizedCookie {
   let expiresAtMs: number | null = null;
-  if (typeof entry.expires === "number") {
+  if (entry.expirationDate !== undefined) {
+    expiresAtMs = entry.expirationDate < 1e12 ? entry.expirationDate * 1000 : entry.expirationDate;
+  } else if (typeof entry.expires === "number") {
     expiresAtMs = entry.expires < 1e12 ? entry.expires * 1000 : entry.expires;
   } else if (entry.expires !== undefined) {
     expiresAtMs = normalizeExpiry(entry.expires, undefined);
@@ -400,6 +406,8 @@ export class CookieStore {
   setCookies(cookies: readonly NormalizedCookie[]): void {
     const landed = (cookie: NormalizedCookie): boolean =>
       this.#jar.getCookiesSync(urlForCookie(cookie)).some((stored) => stored.key === cookie.name);
+    const isExpired = (cookie: NormalizedCookie): boolean =>
+      cookie.expiresAtMs !== null && cookie.expiresAtMs <= Date.now();
 
     for (const cookie of cookies) {
       const toughCookie = toToughCookie(cookie);
@@ -415,15 +423,26 @@ export class CookieStore {
       }
     }
 
-    // Silent rejections (tough-cookie prefixSecurity:'silent' behavior) are reported per name,
-    // so the operator can see exactly which cookie was skipped.
+    // Distinguish EXPIRED cookies from genuinely rejected ones. tough-cookie
+    // stores an expired cookie but filters it out of getCookiesSync(), so an
+    // expired cookie looks identical to a rejection to a naive counter.
     const missing = cookies.filter((cookie) => !landed(cookie));
-    if (missing.length > 0) {
-      const names = missing.map((cookie) => cookie.name).join(", ");
+    const expiredNames = missing.filter(isExpired).map((cookie) => cookie.name);
+    const rejectedNames = missing.filter((cookie) => !isExpired(cookie)).map((cookie) => cookie.name);
+
+    if (expiredNames.length > 0) {
       console.warn(
-        `[panindigan-automate] ${missing.length} of ${cookies.length} cookies were silently rejected by tough-cookie: ${names}. ` +
-        `Cookies with __Secure-/__Host- prefixes need Secure (+ Path=/ and no Domain for __Host-) attributes in the export. ` +
-        `The required c_user/xs/datr are not among the rejects (they passed validation); export fresh cookies from an actively logged-in browser.`
+        `[panindigan-automate] ${expiredNames.length} of ${cookies.length} cookies from this export are already expired: ${expiredNames.join(", ")}. ` +
+        `They were dropped by the browser export's own expiry dates, not by the library. ` +
+        `Export fresh cookies if you need them, but note that the required c_user/xs/datr are validated separately.`
+      );
+    }
+
+    if (rejectedNames.length > 0) {
+      console.warn(
+        `[panindigan-automate] ${rejectedNames.length} of ${cookies.length} cookies were rejected by tough-cookie: ${rejectedNames.join(", ")}. ` +
+        `This can happen with __Secure-/__Host- prefixes that lack required attributes (Secure, Path=/, no Domain for __Host-). ` +
+        `The required c_user/xs/datr are not among them (they passed validation); export fresh cookies from an actively logged-in browser if authentication fails.`
       );
     }
   }

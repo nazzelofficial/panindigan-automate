@@ -313,13 +313,79 @@ class MultiDestination {
 
 type PrettyStreamFactory = (options: { colorize: boolean; translateTime: string; ignore: string }) => { write: (line: string) => void };
 
+/**
+ * Built-in colorized destination for pino's JSON lines.
+ *
+ * Works with zero external dependencies — `pino-pretty` is optional and
+ * often absent in deployments, which used to make `prettyPrint: true` a
+ * silent no-op (plain "simple logs"). pino still redacts secrets BEFORE
+ * handing us the line, so coloring is safe. Used for local development;
+ * production keeps plain redacted JSON unless prettyPrint is requested.
+ */
+export class ColorizedDestination {
+  write(line: string): void {
+    const trimmed = line.trim();
+    if (trimmed === "") return;
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      process.stdout.write(line);
+      return;
+    }
+
+    const level = typeof record["level"] === "number" ? record["level"] : 30;
+    const badge = (() => {
+      switch (level) {
+        case 60: return `${colors.bgError}${colors.bold}\x1b[30m FATAL ${colors.reset}`;
+        case 50: return `${colors.bgError}${colors.bold}\x1b[30m ERROR ${colors.reset}`;
+        case 40: return `${colors.bgWarning}${colors.bold}\x1b[30m WARN  ${colors.reset}`;
+        case 30: return `${colors.bgInfo}${colors.bold}\x1b[30m INFO  ${colors.reset}`;
+        case 20: return `${colors.dim}DEBUG ${colors.reset}`;
+        case 10: return `${colors.darkGray}TRACE ${colors.reset}`;
+        default: return `${colors.info}LOG   ${colors.reset}`;
+      }
+    })();
+
+    const time = typeof record["time"] === "number"
+      ? new Date(record["time"]).toISOString().slice(11, 23)
+      : "";
+    const module = typeof record["module"] === "string" ? record["module"] : undefined;
+    const msg = typeof record["msg"] === "string" ? record["msg"] : "";
+
+    const reserved = new Set(["level", "time", "msg", "name", "library", "pid", "hostname", "module"]);
+    const context = Object.entries(record).filter(([key]) => !reserved.has(key));
+
+    const parts = [
+      `${colors.gray}[${time}]${colors.reset}`,
+      badge,
+      module ? `${colors.purple}${module}${colors.reset}` : "",
+      `${colors.bold}${msg}${colors.reset}`,
+    ].filter(Boolean);
+
+    let out = parts.join(" ");
+    if (context.length > 0) {
+      const details = context
+        .map(([key, value]) => {
+          const text = typeof value === "string" ? value : JSON.stringify(value);
+          return `${colors.dim}${key}${colors.reset}=${colors.lightGray}${text}${colors.reset}`;
+        })
+        .join(`${colors.darkGray} · ${colors.reset}`);
+      out += `  ${colors.darkGray}${details}${colors.reset}`;
+    }
+    process.stdout.write(`${out}\n`);
+  }
+}
+
 function loadPrettyStream(): { write: (line: string) => void } | null {
+  // pino-pretty, when installed, is the canonical formatter for local use.
   try {
     const require = createRequire(process.cwd() + "/package.json");
     const mod: unknown = require("pino-pretty");
     if (typeof mod !== "function") return null;
     return (mod as PrettyStreamFactory)({ colorize: true, translateTime: "SYS:standard", ignore: "pid,hostname" });
   } catch {
+    // Fall back to the built-in colorizer below — never a silent no-op.
     return null;
   }
 }
@@ -333,14 +399,18 @@ export function createRootLogger(options: LoggerOptions): Logger {
 
   const dests: { write: (line: string) => void }[] = [];
   if (options.prettyPrint) {
-    const p = loadPrettyStream();
-    if (p) dests.push(p);
+    // Local development: always colorized. Prefer pino-pretty if present,
+    // otherwise the built-in colorizer — either way it is never a no-op.
+    dests.push(loadPrettyStream() ?? new ColorizedDestination());
   }
   if (options.logFile) dests.push(pino.destination({ dest: options.logFile, append: true, mkdir: true }));
   if (dests.length === 0 && options.transports.length === 0) dests.push(pino.destination({ dest: 1, sync: false }));
   if (options.transports.length > 0) dests.push(new MultiDestination(options.transports));
 
-  const dest = dests.length === 1 ? dests[0]! : new MultiDestination(options.transports);
+  // FIX: fan out to ALL destinations, not just the custom transports.
+  // Previously `new MultiDestination(options.transports)` dropped the
+  // pretty/file destinations whenever more than one was configured.
+  const dest = dests.length === 1 ? dests[0]! : new MultiDestination(dests);
   return pino({
     name: LIBRARY_NAME,
     level: options.level,

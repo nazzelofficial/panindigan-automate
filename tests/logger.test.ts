@@ -7,7 +7,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MessengerClient } from "../src/index.js";
-import { createRootLogger } from "../src/index.js";
+import { createRootLogger, ColorizedDestination } from "../src/index.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -56,5 +56,32 @@ describe("ConsoleLogger", () => {
     const logger = createRootLogger(infoOpts);
     logger.warn("should not reach console.log");
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("the built-in colorizer renders a pino JSON line with colors (no pino-pretty needed)", () => {
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const dest = new ColorizedDestination();
+    dest.write(JSON.stringify({
+      level: 30,
+      time: Date.now(),
+      module: "mqtt",
+      msg: "connected",
+      region: "hil",
+    }) + "\n");
+    const output = spy.mock.calls.map((call) => String(call[0])).join("");
+    expect(output).toContain("connected");
+    expect(output).toContain("hil");
+    expect(output).toContain("mqtt");
+    expect(output).toContain("\x1b["); // ANSI color codes present
+  });
+
+  it("fans out to both pretty and custom transports (multi-destination fix)", () => {
+    const lines: string[] = [];
+    const transport = { write: (line: string) => { lines.push(line); } };
+    const logger = createRootLogger({ ...infoOpts, prettyPrint: true, transports: [transport] });
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    logger.info("fanned out");
+    expect(lines.some((line) => line.includes("fanned out"))).toBe(true);
+    expect(spy.mock.calls.map((c) => String(c[0])).join("")).toContain("fanned out");
   });
 });
