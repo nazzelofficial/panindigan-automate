@@ -263,6 +263,57 @@ function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
+/** Redirect targets that mean Facebook refused the session, not a transient hop. */
+export function isLoginRedirect(url: string): boolean {
+  try {
+    return /\/login|\/checkpoint|checkpoint\.php/i.test(new URL(url).pathname);
+  } catch {
+    return /\/login|\/checkpoint/i.test(url);
+  }
+}
+
+/** Stable identity for loop detection — Facebook's redirect queries churn every hop. */
+export function redirectKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host.toLowerCase()}${parsed.pathname}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Builds a precise failure for an exhausted or looping redirect chain.
+ * A chain that passed through a login/checkpoint URL is a session problem —
+ * reporting "Redirect limit exceeded" there sent users chasing a network bug.
+ */
+export function redirectFailure(
+  operation: string,
+  limit: number,
+  finalUrl: string,
+  sawLogin: boolean,
+  streaming: boolean,
+  loop: boolean,
+): LibraryError {
+  const detail = loop ? "a redirect loop" : `the redirect limit (${limit})`;
+  if (sawLogin) {
+    return new AuthenticationError(
+      `Session is no longer valid — "${operation}" reached ${detail} after being redirected to Facebook's login page. ` +
+        `Re-export cookies from a browser that is currently logged in.`,
+      "AUTH_SESSION_EXPIRED",
+      {
+        retryable: false,
+        context: { operation, finalUrl, redirectLimit: limit, loop, ...(streaming ? { streaming: true } : {}) },
+      },
+    );
+  }
+  return new TransportError(
+    `${streaming ? `Redirect ${loop ? "loop" : "limit"} (${limit}) exceeded while streaming` : `Redirect ${loop ? "loop detected" : `limit (${limit}) exceeded`} during`} "${operation}"`,
+    "TRANSPORT_ERROR",
+    { context: { operation, finalUrl, redirectLimit: limit, loop } },
+  );
+}
+
 /** Whether a status code merits an automatic retry. */
 function isRetryableStatus(status: number): boolean {
   return status === 429 || (status >= 500 && status < 600);
@@ -516,6 +567,8 @@ export class HttpTransport {
     const timeoutMs = options.timeoutMs ?? this.#config.httpTimeout;
     let currentUrl = target;
     let redirectsLeft = this.#config.httpMaxRedirects;
+    const visited = new Set<string>([redirectKey(currentUrl)]);
+    let sawLogin = false;
     for (;;) {
       const requestHeaders: Record<string, string> = {
         ...context.mutatedHeaders(),
@@ -542,18 +595,19 @@ export class HttpTransport {
       const location = headerAsString(response.headers["location"]);
       if (isRedirectStatus(response.statusCode) && location !== null) {
         await response.body.dump().catch(() => undefined);
-        if (redirectsLeft <= 0) {
-          const error = new TransportError(
-            `Redirect limit (${this.#config.httpMaxRedirects}) exceeded while streaming "${operation}"`,
-            "TRANSPORT_ERROR",
-            { context: { operation, limit: this.#config.httpMaxRedirects } },
-          );
+        const nextUrl = new URL(location, currentUrl).toString();
+        if (isLoginRedirect(nextUrl)) sawLogin = true;
+        const key = redirectKey(nextUrl);
+        const loop = visited.has(key);
+        visited.add(key);
+        if (loop || redirectsLeft <= 0) {
+          const error = redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, true, loop);
           context.error = error;
           await this.#middleware.runError(context);
           throw error;
         }
         redirectsLeft -= 1;
-        currentUrl = new URL(location, currentUrl).toString();
+        currentUrl = nextUrl;
         continue;
       }
       this.#diagnostics.recordHttpRequest({ succeeded: response.statusCode === 200, latencyMs: latency });
@@ -783,11 +837,14 @@ export class HttpTransport {
     let currentUrl = url;
     let currentMethod = method;
     let currentBody: string | FormData | null = spec.body;
+    let currentHeaders: Readonly<Record<string, string>> = headers;
     let redirectsLeft = this.#config.httpMaxRedirects;
+    const visited = new Set<string>([redirectKey(currentUrl)]);
+    let sawLogin = false;
 
     for (;;) {
       const requestHeaders: Record<string, string> = {
-        ...headers,
+        ...currentHeaders,
         cookie: this.#cookies.headerFor(currentUrl),
       };
       const started = Date.now();
@@ -809,19 +866,24 @@ export class HttpTransport {
       const location = headerAsString(response.headers["location"]);
       if (isRedirectStatus(response.statusCode) && location !== null) {
         await response.body.dump().catch(() => undefined);
-        if (redirectsLeft <= 0) {
-          throw new TransportError(
-            `Redirect limit (${this.#config.httpMaxRedirects}) exceeded during "${operation}"`,
-            "TRANSPORT_ERROR",
-            { context: { operation, limit: this.#config.httpMaxRedirects } },
-          );
+        const nextUrl = new URL(location, currentUrl).toString();
+        if (isLoginRedirect(nextUrl)) sawLogin = true;
+        const key = redirectKey(nextUrl);
+        const loop = visited.has(key);
+        visited.add(key);
+        if (loop || redirectsLeft <= 0) {
+          throw redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, false, loop);
         }
         redirectsLeft -= 1;
         if (response.statusCode === 303 || ((response.statusCode === 301 || response.statusCode === 302) && currentMethod === "POST")) {
           currentMethod = "GET";
           currentBody = null;
+          // Body headers must not follow a POST -> GET redirect; some servers
+          // reject the request (or bounce again) when they see content-length.
+          const { "content-type": _ct, "content-length": _cl, "transfer-encoding": _te, ...getHeaders } = currentHeaders;
+          currentHeaders = getHeaders;
         }
-        currentUrl = new URL(location, currentUrl).toString();
+        currentUrl = nextUrl;
         continue;
       }
 

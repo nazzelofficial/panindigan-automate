@@ -54,7 +54,10 @@ const DEFAULTS = {
   useConsoleLogger: false,
   httpTimeout: 30_000,
   httpRetries: 3,
-  httpMaxRedirects: 5,
+  // Facebook's home page can legitimately hop through several locales and
+  // edge hosts before settling. Five used to fail valid sessions; ten still
+  // stops loops quickly (loop detection catches true cycles immediately).
+  httpMaxRedirects: 10,
   httpProxy: null,
   userAgent: DEFAULT_USER_AGENT,
   heartbeatInterval: 60,

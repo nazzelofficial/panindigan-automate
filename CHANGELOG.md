@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.8] - 2026-11-20
+
+Patch release: redirect handling for the login request.
+
+### Changed
+
+- Raised the default `httpMaxRedirects` from 5 to 10 so legitimate multi-hop logins (locale and edge-host redirects) are not cut short. Still configurable via `httpMaxRedirects` / `PANINDIGAN_HTTP_MAX_REDIRECTS`.
+- Redirect loops are now detected by host + path (query strings churn on every Facebook hop), so a cycle fails immediately instead of burning the whole budget.
+
+### Fixed
+
+- Login redirects to Facebook's login/checkpoint page now produce a clear `AUTH_SESSION_EXPIRED` error with re-export instructions, instead of the misleading `Redirect limit (5) exceeded during "login"`. Both the normal and streaming request paths are covered.
+- POST → GET redirects no longer carry `content-type` / `content-length` / `transfer-encoding` headers, which could cause further redirects.
+
+### Added
+
+- Redirect classification tests (265 tests, 19 files).
+
 ## [0.2.7] - 2026-11-20
 
 Patch release: professional logging everywhere, lifecycle visibility, and realtime connection recovery.

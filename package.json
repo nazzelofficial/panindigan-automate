@@ -1,6 +1,6 @@
 {
   "name": "panindigan-automate",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "Facebook Messenger automation for personal accounts over HTTP and MQTT, written from scratch in strict TypeScript.",
   "keywords": [
     "facebook",
