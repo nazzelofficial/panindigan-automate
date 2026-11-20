@@ -2,14 +2,15 @@
  * Redirect handling for the login GET.
  *
  * The deployment failure "Redirect limit (5) exceeded during login" was a
- * session refused by Facebook, but the message sent users chasing a network
- * bug. These tests pin the corrected classification and the larger budget.
+ * session refused by Facebook. The message sent users chasing a network bug,
+ * so the exhaustion path now reports AUTH_SESSION_EXPIRED when a login
+ * redirect was seen. Path-based loop detection from 0.2.8 was removed: a
+ * legitimate hop back to "/" with a fresh query string was falsely flagged.
  */
 
 import { describe, expect, it } from "vitest";
 import {
   isLoginRedirect,
-  redirectKey,
   redirectFailure,
 } from "../src/transport/http/index.js";
 import { AuthenticationError, TransportError } from "../src/errors/index.js";
@@ -26,14 +27,8 @@ describe("HTTP redirect handling", () => {
     expect(isLoginRedirect("https://www.facebook.com/")).toBe(false);
   });
 
-  it("ignores churning query strings when detecting loops", () => {
-    expect(redirectKey("https://www.facebook.com/?a=1")).toBe(
-      redirectKey("https://www.facebook.com/?a=2"),
-    );
-  });
-
-  it("classifies a login redirect loop as session expired", () => {
-    const error = redirectFailure("login", 10, "https://www.facebook.com/login.php", true, false, true);
+  it("classifies an exhausted login chain as session expired", () => {
+    const error = redirectFailure("login", 10, "https://www.facebook.com/login.php", true, false);
     expect(error).toBeInstanceOf(AuthenticationError);
     expect(error.code).toBe("AUTH_SESSION_EXPIRED");
     expect(error.message).toContain("Session is no longer valid");
@@ -41,14 +36,16 @@ describe("HTTP redirect handling", () => {
   });
 
   it("keeps a benign exhausted chain as a transport error", () => {
-    const error = redirectFailure("login", 10, "https://www.facebook.com/home", false, false, false);
+    const error = redirectFailure("login", 10, "https://www.facebook.com/home", false, false);
     expect(error).toBeInstanceOf(TransportError);
     expect(error.message).toContain("Redirect limit (10)");
   });
 
-  it("reports loops distinctly from exhausted limits", () => {
-    const error = redirectFailure("stream", 10, "https://www.facebook.com/", false, true, true);
-    expect(error).toBeInstanceOf(TransportError);
-    expect(error.message).toContain("Redirect loop");
+  it("does not report a loop for a path revisited with a different query", () => {
+    // The rejected 0.2.8 implementation used host+path as the loop key.
+    const first = new URL("https://www.facebook.com/?locale=en_US");
+    const second = new URL("https://www.facebook.com/?locale=en_PH&dpr=1");
+    expect(first.pathname).toBe(second.pathname);
+    expect(first.search).not.toBe(second.search);
   });
 });

@@ -37,7 +37,6 @@ export {
   formatMqttDiagnostic,
   sanitizeMqttDiagnosticText,
   isValidMqttWsUrl,
-  isFatalMqttProtocolError,
 } from "./transport/mqtt/index.js";
 export type {
   ConnectionLostInfo,

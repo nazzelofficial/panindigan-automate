@@ -27,6 +27,7 @@
 
 import { randomBytes, createHash } from "node:crypto";
 import { networkInterfaces, cpus, hostname } from "node:os";
+import type { Logger } from "../logger/index.js";
 
 /** Device fingerprint that persists across restarts */
 export interface DeviceFingerprint {
@@ -158,17 +159,31 @@ export function addEntropyToRequest(): string {
  */
 export class AntiDetectionManager {
   readonly #config: AntiDetectionConfig;
+  readonly #logger: Logger | null;
   #currentFingerprint: DeviceFingerprint;
   #hardwareId: string;
   #rotationTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(config: Partial<AntiDetectionConfig> = {}) {
+  constructor(config: Partial<AntiDetectionConfig> = {}, logger: Logger | null = null) {
     this.#config = { ...DEFAULT_ANTI_DETECTION_CONFIG, ...config };
+    this.#logger = logger === null ? null : logger.child({ module: "anti-detection" });
     this.#hardwareId = generateHardwareDeviceId();
     this.#currentFingerprint = this.#generateFingerprint();
 
     if (this.#config.enabled) {
+      // Report the real state — no "indistinguishable from human" claims.
+      this.#logger?.info(
+        {
+          enabled: true,
+          rotationMs: this.#config.fingerprintRotationMs,
+          jitterMs: this.#config.timingJitterMs,
+          obfuscateRequests: this.#config.obfuscateRequests,
+        },
+        "Anti-detection initialized",
+      );
       this.#scheduleRotation();
+    } else {
+      this.#logger?.info({ enabled: false }, "Anti-detection disabled");
     }
   }
 
@@ -189,6 +204,10 @@ export class AntiDetectionManager {
 
     this.#rotationTimer = setTimeout(() => {
       this.#currentFingerprint = this.#generateFingerprint();
+      this.#logger?.debug(
+        { platform: this.#currentFingerprint.platform, userAgent: this.#currentFingerprint.userAgent },
+        "Anti-detection fingerprint rotated",
+      );
       this.#scheduleRotation();
     }, this.#config.fingerprintRotationMs);
   }
@@ -206,8 +225,9 @@ export class AntiDetectionManager {
   /** Applies timing jitter delay */
   async applyJitter(): Promise<void> {
     if (!this.#config.enabled) return;
-    
+
     const delayMs = applyTimingJitter(this.#config);
+    this.#logger?.debug({ delayMs }, "Anti-detection pre-send jitter applied");
     await new Promise(resolve => setTimeout(resolve, delayMs));
   }
 

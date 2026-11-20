@@ -7,7 +7,6 @@
  * can be shipped to an aggregator unmodified.
  */
 
-import { createRequire } from "node:module";
 import pino from "pino";
 import { LIBRARY_NAME } from "../constants.js";
 
@@ -313,8 +312,6 @@ class MultiDestination {
   }
 }
 
-type PrettyStreamFactory = (options: { colorize: boolean; translateTime: string; ignore: string }) => { write: (line: string) => void };
-
 /** JSON.stringify that never throws on circular or exotic context values. */
 function safeStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -350,7 +347,7 @@ function colorValue(value: unknown): string {
   const text = String(value ?? "—");
   if (/^(true|enabled|connected|ready|active|ok|yes|closed)$/i.test(text)) return colors.success;
   if (/^(false|disabled|halted|down|no)$/i.test(text)) return colors.error;
-  if (/^(https?:\/\/|github\.com\/)/i.test(text)) return colors.link;
+  if (/^(https?:\/\/|wss?:\/\/|github\.com\/)/i.test(text)) return colors.link;
   return colors.pink;
 }
 
@@ -363,6 +360,16 @@ const LEVEL_STYLE: Record<number, { icon: string; iconColor: string; label: stri
   20: { icon: "●", iconColor: colors.purple, label: "DEBUG", labelColor: colors.gray },
   10: { icon: "›", iconColor: colors.darkGray, label: "TRACE", labelColor: colors.darkGray },
 };
+
+/** Pino's ISO timestamp -> `12:11:41 PM` (12-hour clock, always readable). */
+function formatClock(rawTime: unknown): string {
+  const date = typeof rawTime === "number" || typeof rawTime === "string" ? new Date(rawTime) : new Date();
+  if (Number.isNaN(date.getTime())) return "";
+  const hours24 = date.getHours();
+  const hours = hours24 % 12 || 12;
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${pad(hours)}:${pad(date.getMinutes())}:${pad(date.getSeconds())} ${hours24 >= 12 ? "PM" : "AM"}`;
+}
 
 /**
  * Built-in colorized destination for pino's JSON lines.
@@ -387,44 +394,50 @@ export class ColorizedDestination {
     const level = typeof record["level"] === "number" ? record["level"] : 30;
     const style = LEVEL_STYLE[level] ?? { icon: "•", iconColor: colors.info, label: "LOG", labelColor: colors.info };
 
-    // pino's isoTime emits a STRING; numeric timestamps are also accepted.
-    const rawTime = record["time"];
-    const time = typeof rawTime === "number"
-      ? new Date(rawTime).toISOString().slice(11, 23)
-      : typeof rawTime === "string"
-        ? (rawTime.includes("T") ? rawTime.slice(11, 23) : rawTime.slice(0, 12))
-        : "";
-
     const panel = record["panel"];
     if (panel !== null && typeof panel === "object" && typeof (panel as LogPanel).title === "string") {
       process.stdout.write(this.#renderPanel(panel as LogPanel));
       return;
     }
 
-    const module = typeof record["module"] === "string" ? record["module"] : undefined;
-    const msg = typeof record["msg"] === "string" ? record["msg"] : "";
+    const clock = formatClock(record["time"]);
+    const app = typeof record["library"] === "string"
+      ? record["library"]
+      : typeof record["name"] === "string" ? record["name"] : LIBRARY_NAME;
+    const moduleName = typeof record["module"] === "string" ? record["module"].toUpperCase() : undefined;
+    const err = record["err"];
+    const errObject = err !== null && typeof err === "object" ? (err as Record<string, unknown>) : null;
+    let msg = typeof record["msg"] === "string" ? record["msg"] : "";
+    if (msg === "" && errObject !== null && typeof errObject["message"] === "string") {
+      msg = errObject["message"];
+    }
+
     const reserved = new Set([
-      "level", "time", "msg", "name", "library", "pid", "hostname", "module", "panel",
+      "level", "time", "msg", "name", "library", "pid", "hostname", "module", "panel", "err",
     ]);
     const context = Object.entries(record).filter(([key]) => !reserved.has(key));
 
     const parts = [
-      `${colors.darkGray}${time}${colors.reset}`,
-      `${style.iconColor}${style.icon}${colors.reset} ${colors.bold}${style.labelColor}${style.label}${colors.reset}`,
-      module ? `${colors.purple}[${module}]${colors.reset}` : "",
+      `${colors.darkGray}${clock}${colors.reset}`,
+      `${style.iconColor}${style.icon}${colors.reset} ${colors.bold}${style.labelColor}${style.label.padEnd(6)}${colors.reset}`,
+      `${colors.gray}[${app}]${colors.reset}`,
+      moduleName ? `${colors.purple}[${moduleName}]${colors.reset}` : "",
       msg === "" ? "" : `${colors.message}${msg}${colors.reset}`,
     ].filter((part): part is string => part !== "");
 
-    let out = parts.join("  ");
+    // Two spaces after the clock, single spaces between the remaining fields.
+    let out = parts.length > 0 ? `${parts[0]}  ${parts.slice(1).join(" ")}` : "";
+    if (typeof err === "string") {
+      // MQTT errors are logged as `{ err: message }` strings — never drop them.
+      out += `  ${colors.dim}err${colors.reset}=${colors.error}${err}${colors.reset}`;
+    } else if (errObject !== null) {
+      const text = typeof errObject["message"] === "string" ? errObject["message"] : safeStringify(errObject);
+      const code = typeof errObject["code"] === "string" ? ` (${errObject["code"]})` : "";
+      out += `  ${colors.dim}err${colors.reset}=${colors.error}${text}${code}${colors.reset}`;
+    }
     if (context.length > 0) {
       const details = context
         .map(([key, value]) => {
-          if (key === "err" && value !== null && typeof value === "object") {
-            const err = value as Record<string, unknown>;
-            const text = typeof err["message"] === "string" ? err["message"] : String(value);
-            const code = typeof err["code"] === "string" ? ` (${err["code"]})` : "";
-            return `${colors.dim}err${colors.reset}=${colors.error}${text}${code}${colors.reset}`;
-          }
           const text = typeof value === "string" ? value : safeStringify(value);
           const short = text.length > 200 ? `${text.slice(0, 197)}...` : text;
           return `${colors.dim}${key}${colors.reset}=${colorValue(value)}${short}${colors.reset}`;
@@ -433,6 +446,13 @@ export class ColorizedDestination {
       out += `  ${colors.darkGray}${details}${colors.reset}`;
     }
     process.stdout.write(`${out}\n`);
+
+    // Complete stack traces on following lines — never truncated, never JSON.
+    if (errObject !== null && typeof errObject["stack"] === "string") {
+      for (const line of errObject["stack"].split("\n")) {
+        process.stdout.write(`${colors.dim}    ${line}${colors.reset}\n`);
+      }
+    }
   }
 
   /** Renders a framed panel with a cyan border and semantically colored values. */
@@ -446,7 +466,14 @@ export class ColorizedDestination {
     const tone = tones[panel.tone ?? "info"];
     const rows = Array.isArray(panel.rows) ? panel.rows : [];
     const labelWidth = Math.max(12, ...rows.map(([label]) => String(label).length));
-    const width = 58;
+    // Grow the box for long values such as the WebSocket URL instead of
+    // letting them spill past the right border.
+    const longest = Math.max(
+      panel.title.length + 6,
+      (panel.footer?.length ?? 0) + 4,
+      ...rows.map(([label, value]) => labelWidth + String(value ?? "").length + 8),
+    );
+    const width = Math.min(Math.max(58, longest), 110);
 
     const edge = (left: string, fill: string, right: string): string =>
       `${colors.link}${left}${fill.repeat(width - 2)}${right}${colors.reset}\n`;
@@ -478,19 +505,6 @@ function visibleLength(text: string): number {
   return text.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
-function loadPrettyStream(): { write: (line: string) => void } | null {
-  // pino-pretty, when installed, is the canonical formatter for local use.
-  try {
-    const require = createRequire(process.cwd() + "/package.json");
-    const mod: unknown = require("pino-pretty");
-    if (typeof mod !== "function") return null;
-    return (mod as PrettyStreamFactory)({ colorize: true, translateTime: "SYS:standard", ignore: "pid,hostname" });
-  } catch {
-    // Fall back to the built-in colorizer below — never a silent no-op.
-    return null;
-  }
-}
-
 export function createRootLogger(options: LoggerOptions): Logger {
   // When the console logger is requested, `logFile` and `prettyPrint` are ignored —
   // the console logger always writes to stdout and keeps a small level gate internally.
@@ -500,9 +514,10 @@ export function createRootLogger(options: LoggerOptions): Logger {
 
   const dests: { write: (line: string) => void }[] = [];
   if (options.prettyPrint) {
-    // Local development: always colorized. Prefer pino-pretty if present,
-    // otherwise the built-in colorizer — either way it is never a no-op.
-    dests.push(loadPrettyStream() ?? new ColorizedDestination());
+    // One centralized formatter for every host. pino-pretty stays a regular
+    // dependency, but routing through it here would produce a different,
+    // inconsistent format depending on where the process is started.
+    dests.push(new ColorizedDestination());
   }
   if (options.logFile) dests.push(pino.destination({ dest: options.logFile, append: true, mkdir: true }));
   if (dests.length === 0 && options.transports.length === 0) dests.push(pino.destination({ dest: 1, sync: false }));

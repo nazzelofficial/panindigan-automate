@@ -191,7 +191,18 @@ function readEnvironment(): Record<string, unknown> {
     }
   };
   maybe("logLevel", envString(`${ENV_PREFIX}LOG_LEVEL`));
-  maybe("prettyPrint", envBoolean(`${ENV_PREFIX}PRETTY_PRINT`));
+  // `LOG_LEVEL` is the conventional name used by hosts such as Render. The
+  // prefixed variant still wins when both are present.
+  if (overrides["logLevel"] === undefined) {
+    maybe("logLevel", envString("LOG_LEVEL"));
+  }
+  // Pretty output is unconditional in production. The old
+  // PANINDIGAN_PRETTY_PRINT variable is deliberately ignored — setting it to
+  // false used to turn every deployment log back into raw JSON. Machine
+  // parsing now requires an explicit opt-in via PANINDIGAN_JSON_LOGS=true.
+  if (envBoolean(`${ENV_PREFIX}JSON_LOGS`) === true) {
+    maybe("prettyPrint", false);
+  }
   maybe("logFile", envString(`${ENV_PREFIX}LOG_FILE`));
   maybe("useConsoleLogger", envBoolean(`${ENV_PREFIX}USE_CONSOLE_LOGGER`));
   maybe("httpTimeout", envNumber(`${ENV_PREFIX}HTTP_TIMEOUT`));

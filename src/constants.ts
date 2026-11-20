@@ -11,7 +11,7 @@
 export const LIBRARY_NAME = "panindigan-automate";
 
 /** Library version. Mirrors package.json. */
-export const VERSION = "0.2.8";
+export const VERSION = "0.2.9";
 
 /**
  * Default User-Agent: a reduced Chrome UA string. The major version is kept

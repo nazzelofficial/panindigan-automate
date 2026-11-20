@@ -237,7 +237,7 @@ export class SessionManager {
    */
   async prepareLogin(credentials: Credentials): Promise<PreparedLogin> {
     const providedCookies = await parseCredentials(credentials);
-    const providedStore = CookieStore.fromCookies(providedCookies);
+    const providedStore = CookieStore.fromCookies(providedCookies, this.#logger);
     const userId = providedStore.requireAuthenticated();
 
     const persisted = await this.loadPersisted();
@@ -319,7 +319,7 @@ export class SessionManager {
   /** Attempts to build a valid cookie store from a persisted serialization. */
   #tryRestoreCookies(serialized: SerializedCookieJar, userId: string): CookieStore | null {
     try {
-      const store = CookieStore.fromSerialized(serialized);
+      const store = CookieStore.fromSerialized(serialized, this.#logger);
       if (store.requireAuthenticated() !== userId) {
         return null;
       }

@@ -2,6 +2,36 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.9] - 2026-11-20
+
+Patch release: professional logging, plus two regressions that broke previously working connections.
+
+### Fixed
+
+- **MQTT no longer disconnects on the `Invalid header flag bits ... puback` warning.** Deployment logs from before 0.2.7 show this warning followed by a successful login — the connection stayed usable. Treating it as fatal made all eight regions cycle forever until `Timed out waiting for the Messenger realtime connection`. The warning is still reported, with its dial diagnostic, but never tears down a working connection.
+- **Removed path-based redirect loop detection.** A legitimate Facebook hop back to `/` with a fresh query string was flagged as a loop, causing intermittent `Redirect loop detected during "login"` failures. The 10-redirect budget still bounds genuine loops, and exhausted login chains still report `AUTH_SESSION_EXPIRED`.
+- **`dbln` is no longer falsely reported as rejected.** A host-only cookie on the canonical `facebook.com` domain was stored through `https://www.facebook.com/`, where tough-cookie keeps it but never returns it — the accounting then called it a rejection. Host-only cookies are now stored under their exact host, so a full export imports 10/10.
+- **Restored `Sec-WebSocket-Protocol: mqttv3.1`.** The working deployment used mqtt.js's default builder, which negotiates `mqttv3.1` for `MQIsdp`/3. Removing the header in 0.2.6 still reached CONNACK but produced a PUBACK parser error on every region. The transport now forwards mqtt.js's own protocol list; the dial diagnostic reports `subProtocol=...` so the next deployment can confirm it.
+- **Anti-detection now reports its real state in the logs.** `AntiDetectionManager` had no logger and was completely silent; it now logs initialization (enabled/rotation/jitter settings) at `info` and fingerprint rotations plus pre-send jitter at `debug`. No claims about evading Facebook controls are made.
+- **Cookie diagnostics no longer bypass the logger.** The three `console.warn` calls in the auth layer (expired cookies, rejected cookies, explicit jar rejection) now go through the centralized pino logger, so they use the same colored format and pino redaction. Cookie names and domains are logged; values never are.
+
+### Changed
+
+- One standardized format on every host: `12:11:41 PM  ℹ INFO   [panindigan-automate] [MQTT] message`. Colored icon + level badge, uppercase module, application name, and a 12-hour clock. Error stack traces print on following lines instead of being truncated.
+- The old `PANINDIGAN_PRETTY_PRINT=false` environment variable is **ignored** — this was why Render kept emitting raw JSON despite the pretty-by-default config. JSON now requires an explicit `prettyPrint: false` or `PANINDIGAN_JSON_LOGS=true`.
+- Added the conventional `LOG_LEVEL` environment variable (the prefixed `PANINDIGAN_LOG_LEVEL` still wins when both are set).
+- `pino-pretty` remains a regular production dependency, but the centralized built-in formatter is the single stdout destination so output never differs by host.
+
+### Notes
+
+- The `MQTT CONNECTED` panel now shows the dialed endpoint (`wss://edge-chat.facebook.com/chat?region=...&sid=...&cid=...`), the MQTT session id, and the **last known** sync sequence id (restored from the previous session — the current one is refetched just after connecting). These are session identifiers only — no cookies, passwords, or tokens are logged. Panels grow to fit long URLs.
+- ANSI colors are emitted; hosts whose log viewer strips escape codes still show the same human-readable text. No claim is made about dashboard color rendering where it cannot be verified.
+- Redaction is unchanged: cookies, tokens, and credentials are censored by pino before formatting.
+
+### Added
+
+- Tests for the standardized format, every level's icon/badge, stack traces, `LOG_LEVEL`, the ignored legacy env var, and the non-fatal puback/redirect behavior (273 tests, 19 files).
+
 ## [0.2.8] - 2026-11-20
 
 Patch release: redirect handling for the login request.

@@ -7,11 +7,24 @@
  * real parser (parseCredentials) -> CookieStore path, not just types.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { parseCredentials, CookieStore } from "../src/auth/index.js";
+import { createRootLogger } from "../src/logger/index.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const future = Math.floor((Date.now() + 30 * DAY_MS) / 1000);
+
+/** Cookie diagnostics now go through the centralized pino logger, not console. */
+function capturingLogger(): { logger: ReturnType<typeof createRootLogger>; lines: string[] } {
+  const lines: string[] = [];
+  const logger = createRootLogger({
+    level: "warn",
+    prettyPrint: false,
+    logFile: null,
+    transports: [{ write: (line) => lines.push(line) }],
+  });
+  return { logger, lines };
+}
 
 const base = () => [
   { key: "c_user", value: "61596880191204", domain: ".facebook.com", path: "/", expirationDate: future, secure: true, httpOnly: false },
@@ -20,6 +33,33 @@ const base = () => [
 ];
 
 describe("cookie export compatibility", () => {
+  it("accepts a host-only dbln on the canonical facebook.com domain (10/10)", async () => {
+    // tough-cookie silently drops a host-only `facebook.com` cookie that is
+    // stored through `https://www.facebook.com/`. The old urlForCookie() check
+    // skipped the exact canonical domain, so dbln was falsely "rejected".
+    const cookies = await parseCredentials([
+      ...base(),
+      {
+        key: "dbln",
+        value: "host-only-value",
+        domain: "facebook.com",
+        path: "/",
+        hostOnly: true,
+        expirationDate: future,
+        secure: true,
+        httpOnly: true,
+      },
+    ]);
+    const { logger, lines } = capturingLogger();
+    const store = CookieStore.fromCookies(cookies, logger);
+
+    expect(lines.join("\n")).not.toContain("were rejected by the cookie jar");
+    // Stored under its exact host; a host-only cookie is correctly NOT sent
+    // to www.facebook.com, so check the jar instead of the www cookie header.
+    const stored = store.toSerialized().cookies.some((cookie) => cookie.key === "dbln");
+    expect(stored).toBe(true);
+  });
+
   it("accepts a desktop AppState array", async () => {
     const cookies = await parseCredentials(base());
     expect(cookies).toHaveLength(3);
@@ -60,13 +100,12 @@ describe("cookie export compatibility", () => {
       ...base(),
       { name: "dbln", value: "expired", domain: ".facebook.com", path: "/", expirationDate: 1, secure: true, httpOnly: true },
     ];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    CookieStore.fromCookies(await parseCredentials(expired));
-    const message = warn.mock.calls.map((c) => c.join(" ")).join("\n");
-    warn.mockRestore();
+    const { logger, lines } = capturingLogger();
+    CookieStore.fromCookies(await parseCredentials(expired), logger);
+    const message = lines.join("\n");
     expect(message).toContain("expired");
     expect(message).toContain("dbln");
-    expect(message).not.toContain("were rejected by tough-cookie");
+    expect(message).not.toContain("were rejected by the cookie jar");
   });
 
   it("accepts a valid dbln without an expiration warning", async () => {
@@ -74,11 +113,9 @@ describe("cookie export compatibility", () => {
       ...base(),
       { name: "dbln", value: "ok", domain: ".facebook.com", path: "/", expirationDate: future, secure: true, httpOnly: true },
     ];
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    CookieStore.fromCookies(await parseCredentials(valid));
-    const message = warn.mock.calls.map((c) => c.join(" ")).join("\n");
-    warn.mockRestore();
-    expect(message).not.toContain("dbln");
+    const { logger, lines } = capturingLogger();
+    CookieStore.fromCookies(await parseCredentials(valid), logger);
+    expect(lines.join("\n")).not.toContain("dbln");
   });
 
   it("handles a missing expiration as a session cookie", async () => {

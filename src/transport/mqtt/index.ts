@@ -143,6 +143,10 @@ export interface MqttDialDiagnostic {
   readonly socketErrorMessage: string | null;
   readonly mqttPacketType: string | null;
   readonly mqttReturnCode: number | null;
+  /** Sec-WebSocket-Protocol actually negotiated, e.g. `mqttv3.1`. */
+  readonly subProtocol: string | null;
+  /** The dialed WebSocket URL (region/sid/cid only — no credentials). */
+  readonly url: string | null;
   readonly handshakeHeaders: Readonly<Record<string, string>>;
 }
 
@@ -162,6 +166,8 @@ export function formatMqttDiagnostic(d: MqttDialDiagnostic): string {
     part("socketErrorMessage", d.socketErrorMessage),
     part("mqttPacketType", d.mqttPacketType),
     part("mqttReturnCode", d.mqttReturnCode),
+    part("subProtocol", d.subProtocol),
+    part("url", d.url),
     `attempt=${d.attempt}`,
     `connectionId=${d.connectionId}`,
   ].filter((value): value is string => value !== null).join(" ");
@@ -202,18 +208,6 @@ export function isValidMqttWsUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * mqtt.js parser errors that invalidate the byte stream. After one of these
- * the socket can stay open while every following packet is ignored — the
- * "connected but nothing happens" state. Recovery requires a fresh CONNECT,
- * not just a warning in the log.
- */
-export function isFatalMqttProtocolError(message: string): boolean {
-  return /invalid header flag bits|must not have both qos bits|invalid connack flags|cannot parse|not supported/i.test(
-    message,
-  );
 }
 
 /** Fired once the sync channel is up: the first `/t_ms` arrived. */
@@ -785,6 +779,8 @@ export class MqttTransport {
         socketErrorMessage: null,
         mqttPacketType: null,
         mqttReturnCode: null,
+        subProtocol: null,
+        url: null,
         handshakeHeaders: {},
       };
       const advance = (stage: MqttDialDiagnostic["stage"], patch: Partial<MqttDialDiagnostic> = {}): void => {
@@ -798,6 +794,7 @@ export class MqttTransport {
       };
       const sessionId = Math.floor(Math.random() * MAX_SESSION_ID) + 1;
       const url = this.#buildUrl(region, sessionId);
+      advance("url-build", { url });
       if (!isValidMqttWsUrl(url)) {
         const error = new MQTTError(`invalid MQTT WebSocket URL for region ${regionName}`, "MQTT_CONNECTION_FAILED", {
           retryable: false,
@@ -851,7 +848,11 @@ export class MqttTransport {
               agent: createWsProxyAgent(proxy, { timeoutMs: MQTT_CONNECT_TIMEOUT_MS }),
             };
 
-      advance("websocket-create", { handshakeHeaders: safeHandshakeHeaders(headers) });
+      // Our CONNECT is always MQIsdp/3, so mqtt.js negotiates mqttv3.1.
+      advance("websocket-create", {
+        subProtocol: "mqttv3.1",
+        handshakeHeaders: safeHandshakeHeaders(headers),
+      });
       const options: IClientOptions = {
         clientId: "mqttwsclient",
         protocolId: "MQIsdp",
@@ -864,16 +865,15 @@ export class MqttTransport {
         // The transport owns reconnection; never let mqtt.js retry on its own.
         reconnectPeriod: 0,
         wsOptions,
-        // The actively-maintained FCA reference creates the socket through
-        // `websocket-stream(host, wsOptions)` — with NO Sec-WebSocket-Protocol
-        // header. mqtt.js's default builder always adds one. Both earlier
-        // variants ("mqttv3.1" forced, then "mqtt" forced) were rejected
-        // before CONNACK, so send no protocol, matching the reference while
-        // keeping the MQIsdp/3 CONNECT packet. This is an attempt — not proof
-        // that MQTT now works; the structured diagnostic below reports the
-        // exact stage if it fails again.
-        createWebsocket: (wsUrl: string, _protocols: string[], wsOpts: IClientOptions) => {
-          const socket = new WebSocket(wsUrl, undefined, wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+        // Keep mqtt.js's OWN negotiated sub-protocol list. For MQIsdp/3 that
+        // is ["mqttv3.1"]. The deployment that stayed online (before 0.2.6)
+        // used mqtt.js's default builder, which sends this header; the variant
+        // that sent no header achieved CONNACK but then hit repeated PUBACK
+        // parser errors on every region. Negotiating mqttv3.1 tells the broker
+        // this client speaks MQTT 3.1, so it frames ACK packets accordingly.
+        // The override exists only to attach the diagnostic listeners below.
+        createWebsocket: (wsUrl: string, protocols: string[], wsOpts: IClientOptions) => {
+          const socket = new WebSocket(wsUrl, protocols, wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
           (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void }).on("upgrade", (response: unknown) => {
             const res = response as { statusCode?: unknown; statusMessage?: unknown };
             advance("websocket-upgrade", {
@@ -1038,16 +1038,39 @@ export class MqttTransport {
     }
     this.#deps.diagnostics.setMqttConnected(true);
     if (reconnect) this.#deps.diagnostics.recordReconnect();
+
+    // The dial diagnostic already holds the exact URL. Only region, sid and
+    // cid are present there — no cookies or tokens — so it is safe to log.
+    const dialUrl = this.#dialDiagnostic?.url ?? null;
+    let sessionId: string | null = null;
+    if (dialUrl !== null) {
+      try {
+        sessionId = new URL(dialUrl).searchParams.get("sid");
+      } catch {
+        sessionId = null;
+      }
+    }
+    const region = this.#preferredRegion ?? "default";
+
     this.#logger.info(
       {
-        region: this.#preferredRegion ?? "default",
+        region,
         reconnect,
         attempt,
+        // Safe to log: the URL carries only region/sid/cid, never credentials.
+        url: dialUrl,
+        sid: sessionId,
+        // This is the persisted seat from the PREVIOUS session; the current
+        // sequence is only refetched just after this log (see below).
+        lastSeqId: this.#lastSeqId,
         panel: {
           title: reconnect ? "MQTT RECONNECTED" : "MQTT CONNECTED",
           tone: "success",
           rows: [
-            ["Region", this.#preferredRegion ?? "default"],
+            ["Region", region],
+            ["Endpoint", dialUrl ?? "wss://edge-chat.facebook.com/chat"],
+            ["MQTT Session", sessionId ?? "—"],
+            ["Last Sync Seq", this.#lastSeqId ?? "—"],
             ["Auto-reconnect", "Enabled"],
             ["Attempt", attempt],
           ],
@@ -1201,16 +1224,12 @@ export class MqttTransport {
       if (generation !== this.#generation) return;
       const detail = sanitizeMqttDiagnosticText(error.message) ?? "unknown error";
       const dial = this.#dialDiagnostic === null ? null : formatMqttDiagnostic(this.#dialDiagnostic);
+      // Facebook's broker sends PUBACK packets whose header flags mqtt.js
+      // considers invalid. The parser warns but the connection stays usable —
+      // deployments before 0.2.7 logged this warning and still went online.
+      // Treating it as fatal (0.2.7) made every region cycle forever and
+      // login time out. Report it, never tear down the connection for it.
       this.#logger.warn({ err: detail, ...(dial !== null ? { dial } : {}) }, "MQTT client error");
-      if (!isFatalMqttProtocolError(error.message ?? "")) return;
-      // A malformed packet desynchronises mqtt.js's parser. The socket may
-      // remain open, so no `close` event arrives and the realtime channel
-      // silently dies (messages stop arriving, commands stop replying).
-      // Cycle the connection explicitly; the generation guard makes the
-      // resulting close event a no-op.
-      this.#logger.warn({ err: detail }, "MQTT protocol error - cycling connection");
-      this.#handleConnectionEnd(client, generation, `MQTT protocol error: ${detail}`);
-      this.#forceEnd(client);
     });
     client.on("disconnect", () => {
       if (generation !== this.#generation) return;

@@ -7,9 +7,10 @@
  * `www.facebook.com` — the exact path the login flow uses.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { CookieError } from "../src/errors/index.js";
 import { CookieStore } from "../src/auth/index.js";
+import { createRootLogger } from "../src/logger/index.js";
 
 const NOW = Date.now();
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -90,13 +91,15 @@ describe("CookieStore", () => {
       },
     ];
     const warnings: string[] = [];
-    const spy = vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
-      warnings.push(args.map(String).join(" "));
+    const logger = createRootLogger({
+      level: "warn",
+      prettyPrint: false,
+      logFile: null,
+      transports: [{ write: (line) => warnings.push(line) }],
     });
 
-    CookieStore.fromCookies(rejected);
+    CookieStore.fromCookies(rejected, logger);
 
-    spy.mockRestore();
     expect(warnings.join("\n")).toContain("__Host-bad-export");
   });
 

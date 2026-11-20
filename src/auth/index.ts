@@ -13,6 +13,7 @@ import { Cookie, CookieJar } from "tough-cookie";
 import type { SerializedCookieJar } from "tough-cookie";
 import { z } from "zod";
 import { CookieError } from "../errors/index.js";
+import type { Logger } from "../logger/index.js";
 import {
   FB_COOKIE_DOMAIN,
   REQUIRED_COOKIES,
@@ -353,12 +354,23 @@ export async function parseCredentials(input: Credentials): Promise<readonly Nor
 }
 
 
-/** Maps a cookie domain to the URL it is stored under. */
+/**
+ * Maps a cookie to the URL it is stored under.
+ *
+ * A host-only cookie must be stored under its EXACT host. tough-cookie keeps
+ * a `facebook.com` host-only cookie when it is set through
+ * `https://www.facebook.com/`, but `getCookiesSync()` never returns it — it
+ * looks identical to a rejection. This is why a `dbln` host-only cookie was
+ * reported as "1 of 10 cookies rejected". The old condition skipped the exact
+ * canonical domain (`facebook.com`), which is precisely the case that needs
+ * the strict host URL.
+ */
 function urlForCookie(cookie: NormalizedCookie): string {
-  if (cookie.hostOnly && cookie.domain !== FB_COOKIE_DOMAIN) {
-    return `https://${cookie.domain.replace(/^\./, "")}/`;
+  const domain = cookie.domain.replace(/^\./, "");
+  if (cookie.hostOnly) {
+    return `https://${domain}/`;
   }
-  return cookie.domain.includes("messenger") ? MESSENGER_URL : FACEBOOK_URL;
+  return domain.includes("messenger") ? MESSENGER_URL : FACEBOOK_URL;
 }
 
 /** Builds a tough-cookie `Cookie` from the normalized form. */
@@ -384,22 +396,24 @@ function toToughCookie(cookie: NormalizedCookie): Cookie {
  */
 export class CookieStore {
   readonly #jar: CookieJar;
+  readonly #logger: Logger | null;
 
-  private constructor(jar: CookieJar) {
+  private constructor(jar: CookieJar, logger: Logger | null = null) {
     this.#jar = jar;
+    this.#logger = logger;
   }
 
   /** Builds a store from normalized cookies. */
-  static fromCookies(cookies: readonly NormalizedCookie[]): CookieStore {
+  static fromCookies(cookies: readonly NormalizedCookie[], logger: Logger | null = null): CookieStore {
     const jar = new CookieJar();
-    const store = new CookieStore(jar);
+    const store = new CookieStore(jar, logger);
     store.setCookies(cookies);
     return store;
   }
 
   /** Restores a store from its serialized form. */
-  static fromSerialized(serialized: SerializedCookieJar): CookieStore {
-    return new CookieStore(CookieJar.fromJSON(JSON.stringify(serialized)));
+  static fromSerialized(serialized: SerializedCookieJar, logger: Logger | null = null): CookieStore {
+    return new CookieStore(CookieJar.fromJSON(JSON.stringify(serialized)), logger);
   }
 
   /** Stores normalized cookies, replacing same-named entries. */
@@ -415,10 +429,12 @@ export class CookieStore {
       try {
         this.#jar.setCookieSync(toughCookie, url);
       } catch (err) {
-        // Explicit rejection (e.g., invalid domain, path)
-        console.warn(
-          `[panindigan-automate] Cookie explicitly rejected: ${cookie.name} for ${cookie.domain}`,
-          err instanceof Error ? err.message : String(err)
+        // Explicit rejection (e.g., invalid domain, path). Cookie names and
+        // domains are safe; values are never logged.
+        const reason = err instanceof Error ? err.message : String(err);
+        this.#logger?.warn(
+          { cookie: cookie.name, domain: cookie.domain, err: reason },
+          "Cookie rejected by the cookie jar",
         );
       }
     }
@@ -431,18 +447,16 @@ export class CookieStore {
     const rejectedNames = missing.filter((cookie) => !isExpired(cookie)).map((cookie) => cookie.name);
 
     if (expiredNames.length > 0) {
-      console.warn(
-        `[panindigan-automate] ${expiredNames.length} of ${cookies.length} cookies from this export are already expired: ${expiredNames.join(", ")}. ` +
-        `They were dropped by the browser export's own expiry dates, not by the library. ` +
-        `Export fresh cookies if you need them, but note that the required c_user/xs/datr are validated separately.`
+      this.#logger?.warn(
+        { count: expiredNames.length, total: cookies.length, names: expiredNames },
+        `${expiredNames.length} of ${cookies.length} cookies in this export are already expired`,
       );
     }
 
     if (rejectedNames.length > 0) {
-      console.warn(
-        `[panindigan-automate] ${rejectedNames.length} of ${cookies.length} cookies were rejected by tough-cookie: ${rejectedNames.join(", ")}. ` +
-        `This can happen with __Secure-/__Host- prefixes that lack required attributes (Secure, Path=/, no Domain for __Host-). ` +
-        `The required c_user/xs/datr are not among them (they passed validation); export fresh cookies from an actively logged-in browser if authentication fails.`
+      this.#logger?.warn(
+        { count: rejectedNames.length, total: cookies.length, names: rejectedNames },
+        `${rejectedNames.length} of ${cookies.length} cookies were rejected by the cookie jar`,
       );
     }
   }

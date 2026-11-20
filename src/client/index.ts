@@ -579,7 +579,7 @@ export class MessengerClient {
         ? { enabled: false } 
         : { enabled: true };
     
-    this.#antiDetect = new AntiDetectionManager(antiDetectConfig);
+    this.#antiDetect = new AntiDetectionManager(antiDetectConfig, this.#logger);
 
     this.#stealth = new StealthGuard({
       config: options.stealth,

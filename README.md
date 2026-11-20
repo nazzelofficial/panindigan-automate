@@ -319,12 +319,12 @@ Common options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `logLevel` | `"info"` | `trace` through `fatal`, or `silent` |
-| `prettyPrint` | `true` | Colorized, human-readable output on any host. Set `false` for JSON |
+| `prettyPrint` | `true` | Colorized, human-readable output on every host, including production. Set `false` in code for JSON |
 | `logFile` | — | Write logs to a file |
 | `logTransports` | `[]` | Additional transports receiving every log record |
 | `httpTimeout` | `30000` | Per-request timeout, in ms |
 | `httpRetries` | `3` | Retries on network errors and 429/5xx |
-| `httpMaxRedirects` | `5` | Redirect limit |
+| `httpMaxRedirects` | `10` | Redirect limit (loops are detected immediately) |
 | `httpProxy` | — | HTTP or SOCKS5 proxy URL — applied to HTTP requests **and** the realtime WebSocket |
 | `userAgent` | Chrome 149 reduced UA | Sent with every request |
 | `heartbeatInterval` | `60` | MQTT keepalive, in seconds |
@@ -338,7 +338,9 @@ Common options:
 | `storageDirectory` | `"./panindigan-session"` | Where the file adapter writes |
 | `validateOnLogin` | `true` | HTTP ping at login to confirm cookies are accepted |
 
-Common options can also come from the environment — `PANINDIGAN_LOG_LEVEL`, `PANINDIGAN_HTTP_TIMEOUT`, `PANINDIGAN_HTTP_PROXY`, `PANINDIGAN_RECONNECT_ATTEMPTS`, and so on. Programmatic options always win.
+Common options can also come from the environment — `LOG_LEVEL` (or `PANINDIGAN_LOG_LEVEL`), `PANINDIGAN_HTTP_TIMEOUT`, `PANINDIGAN_HTTP_PROXY`, `PANINDIGAN_RECONNECT_ATTEMPTS`, and so on. Programmatic options always win.
+
+Pretty logging is **always on** in production: an old `PANINDIGAN_PRETTY_PRINT=false` is ignored. For machine-parsed JSON, set `PANINDIGAN_JSON_LOGS=true` or pass `prettyPrint: false` in code. Colors are emitted as ANSI; hosts that strip them still get the same human-readable text.
 
 Two larger option objects deserve their own sections: [`stealth`](#stealth-guard-on-by-default) (on by default) and [`e2ee`](#e2ee-end-to-end-encryption-experimental) (off by default) — plus `dryRun: true` for a no-network rehearsal.
 
@@ -530,27 +532,32 @@ Plugins run in a sandboxed context: a child logger, namespaced cache and storage
 
 ## Logging
 
-The default is **professional colorized output on every host** — local, Render, Docker, anywhere. It needs no extra dependency: pino redacts secrets first, then the built-in formatter renders each record as `[time] LEVEL module message key=value`. `logFile` and custom transports receive the same redacted records at the same time.
+The default is **professional colorized output on every host** — local, Render, Docker, anywhere. Pino redacts secrets first, then one centralized formatter renders every record:
 
-```ts
-const client = new MessengerClient(); // default: colorized, redacted
+```text
+12:11:41 PM  ℹ INFO   [panindigan-automate] [MQTT] MQTT connection established
+12:11:42 PM  ⚠ WARN   [panindigan-automate] [MQTT] Connection lost. Reconnecting...
+12:11:43 PM  ✖ ERROR  [panindigan-automate] [MQTT] MQTT connection failed
+12:11:44 PM  ● DEBUG  [panindigan-automate] [HTTP] Request completed
 ```
 
-For machine-parsed JSON (log aggregators), opt out explicitly:
+Errors print their complete stack trace on the following lines. Key lifecycle events render as framed panels (`MQTT CONNECTED`, `REALTIME READY`, `STEALTH GUARD`). ANSI colors are emitted for log levels; hosts that strip ANSI still show the same readable format. `logFile` and custom transports receive the same redacted records at the same time.
+
+```ts
+const client = new MessengerClient(); // colorized by default, even in production
+```
+
+For machine-parsed JSON (log aggregators), opt out explicitly — in code or with `PANINDIGAN_JSON_LOGS=true`:
 
 ```ts
 const client = new MessengerClient({ prettyPrint: false });
 ```
-
-`prettyPrint: false` writes pino's redacted JSON. `prettyPrint: true` (the default) uses `pino-pretty` when installed, otherwise the built-in colorizer. Custom transports implement `LogTransport` and are passed via `logTransports`.
 
 There is also a richer console logger with banners and indicators. **It does not redact secrets — local use only.**
 
 ```ts
 const client2 = new MessengerClient({ useConsoleLogger: true });
 ```
-
-If you build a custom logger tree, `createRootLogger` is also exported at the package root:
 
 If you build a custom logger tree, `createRootLogger` is also exported at the package root:
 

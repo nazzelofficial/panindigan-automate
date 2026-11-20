@@ -12,6 +12,7 @@ import { resolveConfig } from "../src/config/index.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 const silentOpts = { level: "silent", prettyPrint: false, logFile: null, transports: [] };
@@ -72,7 +73,8 @@ describe("ConsoleLogger", () => {
     const output = spy.mock.calls.map((call) => String(call[0])).join("");
     expect(output).toContain("connected");
     expect(output).toContain("hil");
-    expect(output).toContain("mqtt");
+    expect(output).toContain("[MQTT]"); // module is uppercased in a bracket
+    expect(output).toContain("[panindigan-automate]");
     expect(output).toContain("\x1b["); // ANSI color codes present
   });
 
@@ -96,12 +98,55 @@ describe("Professional logging is the default on any host", () => {
     expect(resolveConfig({ prettyPrint: false }).prettyPrint).toBe(false);
   });
 
-  it("renders pino's ISO-string timestamp instead of an empty []", () => {
+  it("renders pino's ISO timestamp as a 12-hour clock with AM/PM", () => {
     const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
     const dest = new ColorizedDestination();
     dest.write(JSON.stringify({ level: 30, time: "2026-11-20T02:20:03.670Z", module: "mqtt", msg: "connected" }) + "\n");
     const output = spy.mock.calls.map((call) => String(call[0])).join("");
-    expect(output).toContain("02:20:03.670");
+    expect(output).toContain("10:20:03 AM");
+  });
+
+  it("renders colored icons and labels in the standardized format for every level", () => {
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const dest = new ColorizedDestination();
+    const cases: Array<[number, string, string]> = [
+      [60, "✖", "FATAL"],
+      [50, "✖", "ERROR"],
+      [40, "⚠", "WARN"],
+      [35, "✓", "OK"],
+      [30, "ℹ", "INFO"],
+      [20, "●", "DEBUG"],
+      [10, "›", "TRACE"],
+    ];
+    for (const [level, icon, label] of cases) {
+      spy.mockClear();
+      dest.write(JSON.stringify({ level, time: "2026-11-20T12:11:41.000Z", module: "mqtt", msg: "event" }) + "\n");
+      const output = spy.mock.calls.map((call) => String(call[0])).join("");
+      expect(output).toContain(icon);
+      expect(output).toContain(label);
+      expect(output).toContain("\x1b[");
+      expect(output.replace(/\x1b\[[0-9;]*m/g, "")).toMatch(/\d{2}:\d{2}:\d{2} (AM|PM)/);
+      expect(output).toContain("[panindigan-automate]");
+      expect(output).toContain("[MQTT]");
+      expect(output).not.toContain('"level"');
+    }
+  });
+
+  it("renders complete error stack traces on following lines", () => {
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const dest = new ColorizedDestination();
+    dest.write(JSON.stringify({
+      level: 50,
+      time: "2026-11-20T12:11:43.000Z",
+      module: "mqtt",
+      msg: "MQTT connection failed",
+      err: { type: "Error", message: "boom", stack: "Error: boom\n    at dial (file:///app/mqtt.js:10:5)\n    at main (file:///app/main.js:2:1)" },
+    }) + "\n");
+    const output = spy.mock.calls.map((call) => String(call[0])).join("");
+    expect(output).toContain("MQTT connection failed");
+    expect(output).toContain("at dial (file:///app/mqtt.js:10:5)");
+    expect(output).toContain("at main (file:///app/main.js:2:1)");
+    expect(output).not.toContain('"stack"');
   });
 
   it("renders framed lifecycle panels with colored labels and values", () => {
@@ -141,5 +186,37 @@ describe("Professional logging is the default on any host", () => {
     const output = spy.mock.calls.map((call) => String(call[0])).join("");
     expect(output).toContain("Invalid header flag bits");
     expect(output).not.toContain('"type":"Error"');
+  });
+
+  it("keeps string err fields (used by MQTT error logs)", () => {
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const dest = new ColorizedDestination();
+    dest.write(JSON.stringify({
+      level: 40,
+      time: "2026-11-20T12:11:56.000Z",
+      module: "mqtt",
+      msg: "MQTT client error",
+      err: "Invalid header flag bits, must be 0x0 for puback packet",
+      subProtocol: "mqttv3.1",
+    }) + "\n");
+    const output = spy.mock.calls.map((call) => String(call[0])).join("");
+    const plain = output.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(plain).toContain("Invalid header flag bits");
+    expect(plain).toContain("subProtocol=mqttv3.1");
+  });
+
+  it("ignores a stale PANINDIGAN_PRETTY_PRINT=false on production hosts", () => {
+    vi.stubEnv("PANINDIGAN_PRETTY_PRINT", "false");
+    expect(resolveConfig().prettyPrint).toBe(true);
+  });
+
+  it("supports the conventional LOG_LEVEL environment variable", () => {
+    vi.stubEnv("LOG_LEVEL", "debug");
+    expect(resolveConfig().logLevel).toBe("debug");
+  });
+
+  it("only switches to JSON on an explicit PANINDIGAN_JSON_LOGS=true", () => {
+    vi.stubEnv("PANINDIGAN_JSON_LOGS", "true");
+    expect(resolveConfig().prettyPrint).toBe(false);
   });
 });

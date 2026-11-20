@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { createRootLogger } from "../src/logger/index.js";
 import { MemoryStorage } from "../src/storage/index.js";
-import { StealthGuard, DEFAULT_STEALTH_CONFIG } from "../src/stealth/index.js";
+import { StealthGuard, DEFAULT_STEALTH_CONFIG, AntiDetectionManager } from "../src/stealth/index.js";
 import type { SuspensionSignal } from "../src/stealth/index.js";
 import { TokenBucket } from "../src/stealth/rate-limiter.js";
 
@@ -31,6 +31,34 @@ function makeGuard(config: Record<string, unknown> = {}) {
   });
   return { guard, storage };
 }
+
+describe("AntiDetectionManager logs", () => {
+  it("announces its real state instead of staying silent", () => {
+    const lines: string[] = [];
+    const capture = createRootLogger({
+      level: "debug",
+      prettyPrint: false,
+      logFile: null,
+      transports: [{ write: (line) => lines.push(line) }],
+    });
+    const manager = new AntiDetectionManager({ enabled: true }, capture);
+    expect(lines.join("\n")).toContain("Anti-detection initialized");
+    manager.destroy();
+  });
+
+  it("announces when anti-detection is disabled", () => {
+    const lines: string[] = [];
+    const capture = createRootLogger({
+      level: "debug",
+      prettyPrint: false,
+      logFile: null,
+      transports: [{ write: (line) => lines.push(line) }],
+    });
+    const manager = new AntiDetectionManager({ enabled: false }, capture);
+    expect(lines.join("\n")).toContain("Anti-detection disabled");
+    manager.destroy();
+  });
+});
 
 describe("Stealth Guard lifecycle logs", () => {
   it("announces initialization even on a fresh start with no stored state", async () => {
