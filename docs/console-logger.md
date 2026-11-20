@@ -1,6 +1,6 @@
 # Console Logger
 
-Colorized logging for local development. Production keeps the default redacted JSON. Two modes: `prettyPrint: true` colorizes the pino records (built-in colorizer, no dependency needed), and `useConsoleLogger: true` swaps pino for the richer sectioned console logger.
+Colorized logging is the default on every host. Two modes: `prettyPrint: true` colorizes the pino records (built-in colorizer, no dependency needed), and `useConsoleLogger: true` swaps pino for the richer sectioned console logger.
 
 ## Enabling it (as a client option)
 
@@ -21,13 +21,13 @@ import { createRootLogger } from "panindigan-automate";
 
 const logger = createRootLogger({
   level: "info",
-  prettyPrint: false,     // ignored when console mode is on
+  prettyPrint: true,      // default; ignored when console mode is on
   logFile: null,          // ignored when console mode is on
   transports: [],
   useConsoleLogger: true,
 });
 
-logger.startupBanner("0.2.6");
+logger.startupBanner("0.2.7");
 logger.features([
   { name: "HTTP Transport", status: "enabled" },
   { name: "MQTT Realtime", status: "enabled" },

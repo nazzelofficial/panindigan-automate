@@ -7,7 +7,13 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { formatMqttDiagnostic, sanitizeMqttDiagnosticText, isValidMqttWsUrl, type MqttDialDiagnostic } from "../src/index.js";
+import {
+  formatMqttDiagnostic,
+  sanitizeMqttDiagnosticText,
+  isValidMqttWsUrl,
+  isFatalMqttProtocolError,
+  type MqttDialDiagnostic,
+} from "../src/index.js";
 
 const base: MqttDialDiagnostic = {
   stage: "websocket-close",
@@ -113,5 +119,17 @@ describe("MQTT diagnostic security and URL validation", () => {
     expect(isValidMqttWsUrl("ws://edge-chat.facebook.com/chat")).toBe(false);
     expect(isValidMqttWsUrl("not a url")).toBe(false);
     expect(isValidMqttWsUrl("wss://edge-chat.facebook.com/chat\nX- evil: 1")).toBe(false);
+  });
+
+  it("classifies the observed puback parser error as fatal", () => {
+    expect(isFatalMqttProtocolError("Invalid header flag bits, must be 0x0 for puback packet")).toBe(true);
+    expect(isFatalMqttProtocolError("Invalid connack flags, bits 7-1 must be set to 0")).toBe(true);
+    expect(isFatalMqttProtocolError("Packet must not have both QoS bits set to 1")).toBe(true);
+  });
+
+  it("does not cycle the connection for benign errors", () => {
+    expect(isFatalMqttProtocolError("ECONNRESET")).toBe(false);
+    expect(isFatalMqttProtocolError("MQTT connection closed before CONNACK")).toBe(false);
+    expect(isFatalMqttProtocolError("")).toBe(false);
   });
 });

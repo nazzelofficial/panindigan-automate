@@ -32,7 +32,13 @@ export type {
   RequestTokens,
   UploadFile,
 } from "./transport/http/index.js";
-export { MqttTransport, formatMqttDiagnostic, sanitizeMqttDiagnosticText, isValidMqttWsUrl } from "./transport/mqtt/index.js";
+export {
+  MqttTransport,
+  formatMqttDiagnostic,
+  sanitizeMqttDiagnosticText,
+  isValidMqttWsUrl,
+  isFatalMqttProtocolError,
+} from "./transport/mqtt/index.js";
 export type {
   ConnectionLostInfo,
   LsTaskSpec,

@@ -319,7 +319,7 @@ Common options:
 | Option | Default | Description |
 |--------|---------|-------------|
 | `logLevel` | `"info"` | `trace` through `fatal`, or `silent` |
-| `prettyPrint` | `false` | Human-readable console output via pino-pretty (dev only) |
+| `prettyPrint` | `true` | Colorized, human-readable output on any host. Set `false` for JSON |
 | `logFile` | — | Write logs to a file |
 | `logTransports` | `[]` | Additional transports receiving every log record |
 | `httpTimeout` | `30000` | Per-request timeout, in ms |
@@ -530,36 +530,27 @@ Plugins run in a sandboxed context: a child logger, namespaced cache and storage
 
 ## Logging
 
-Logging is structured JSON on stdout by default, one child logger per module. It is also safe by default: cookie values, tokens, and AppState are redacted at every level before anything is written — you can point production logs at an aggregator without scrubbing them first.
-
-For local development:
+The default is **professional colorized output on every host** — local, Render, Docker, anywhere. It needs no extra dependency: pino redacts secrets first, then the built-in formatter renders each record as `[time] LEVEL module message key=value`. `logFile` and custom transports receive the same redacted records at the same time.
 
 ```ts
-new MessengerClient({ logLevel: "debug", prettyPrint: true });
+const client = new MessengerClient(); // default: colorized, redacted
 ```
 
-`prettyPrint` loads pino-pretty dynamically and is ignored unless installed. Custom transports implement `LogTransport` and are passed via `logTransports`.
-
-### Logging: local development vs production
-
-**Production / deployment (default):** structured JSON on stdout, with cookies, tokens and credentials redacted at every level. Ship these logs to an aggregator as-is.
+For machine-parsed JSON (log aggregators), opt out explicitly:
 
 ```ts
-const client = new MessengerClient(); // default: redacted JSON
+const client = new MessengerClient({ prettyPrint: false });
 ```
 
-**Local development (localhost):** colorized, human-readable output. Two options:
+`prettyPrint: false` writes pino's redacted JSON. `prettyPrint: true` (the default) uses `pino-pretty` when installed, otherwise the built-in colorizer. Custom transports implement `LogTransport` and are passed via `logTransports`.
+
+There is also a richer console logger with banners and indicators. **It does not redact secrets — local use only.**
 
 ```ts
-// Option 1 — pretty-print the same redacted pino logs (recommended):
-const client = new MessengerClient({ prettyPrint: true });
-
-// Option 2 — the richer console logger with banners, icons and indicators.
-// NOTE: no secret redaction in this mode — local use only.
 const client2 = new MessengerClient({ useConsoleLogger: true });
 ```
 
-`prettyPrint: true` produces colorized output with **no extra dependency**: it uses `pino-pretty` when installed locally, otherwise a built-in colorizer. The `logFile` and `logTransports` options still receive the same records at the same time. `pino-pretty` is a local-development tool — do not enable it in production; keep the default JSON there.
+If you build a custom logger tree, `createRootLogger` is also exported at the package root:
 
 If you build a custom logger tree, `createRootLogger` is also exported at the package root:
 

@@ -52,7 +52,7 @@ Creates a new `MessengerClient` instance.
 | :--- | :--- | :--- | :--- |
 | `logLevel` | `string` | `"info"` | `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"fatal"`, or `"silent"`. |
 | `logFile` | `string \| null` | `null` | Path to append structured log output. |
-| `prettyPrint` | `boolean` | `false` | Colorized local-development logs. Uses `pino-pretty` when installed, otherwise a built-in colorizer — no extra dependency needed. Never enable in production; keep redacted JSON there. |
+| `prettyPrint` | `boolean` | `true` | Colorized, redacted output on any host (`pino-pretty` when installed, otherwise built-in). Set `false` for machine-parsed JSON. |
 | `useConsoleLogger` | `boolean` | `false` | Swap pino for the built-in colorized console logger. Console mode writes to stdout only and secret redaction does **not** apply there — for local runs only. |
 | `logTransports` | `LogTransport[]` | `[]` | Additional log transports receiving every record. |
 | `httpProxy` | `string \| null` | `null` | HTTP or SOCKS5 proxy URL. Tunnels both HTTP and MQTT sockets. |

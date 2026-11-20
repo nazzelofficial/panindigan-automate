@@ -204,6 +204,18 @@ export function isValidMqttWsUrl(value: string): boolean {
   }
 }
 
+/**
+ * mqtt.js parser errors that invalidate the byte stream. After one of these
+ * the socket can stay open while every following packet is ignored — the
+ * "connected but nothing happens" state. Recovery requires a fresh CONNECT,
+ * not just a warning in the log.
+ */
+export function isFatalMqttProtocolError(message: string): boolean {
+  return /invalid header flag bits|must not have both qos bits|invalid connack flags|cannot parse|not supported/i.test(
+    message,
+  );
+}
+
 /** Fired once the sync channel is up: the first `/t_ms` arrived. */
 export interface SyncEstablishedInfo {
   /** Whether this is a re-establishment after a drop. */
@@ -1026,7 +1038,24 @@ export class MqttTransport {
     }
     this.#deps.diagnostics.setMqttConnected(true);
     if (reconnect) this.#deps.diagnostics.recordReconnect();
-    this.#logger.info({ region: this.#preferredRegion ?? "default", reconnect, attempt }, "MQTT connection established");
+    this.#logger.info(
+      {
+        region: this.#preferredRegion ?? "default",
+        reconnect,
+        attempt,
+        panel: {
+          title: reconnect ? "MQTT RECONNECTED" : "MQTT CONNECTED",
+          tone: "success",
+          rows: [
+            ["Region", this.#preferredRegion ?? "default"],
+            ["Auto-reconnect", "Enabled"],
+            ["Attempt", attempt],
+          ],
+          footer: "github.com/nazzelofficial/panindigan-automate",
+        },
+      },
+      "MQTT connection established",
+    );
     this.#resolveConnect();
 
     this.#attachClientHandlers(client, generation);
@@ -1170,8 +1199,18 @@ export class MqttTransport {
     });
     client.on("error", (error) => {
       if (generation !== this.#generation) return;
-      this.#logger.warn({ err: error.message }, "MQTT client error");
-      // The close event follows and drives the reconnect cycle.
+      const detail = sanitizeMqttDiagnosticText(error.message) ?? "unknown error";
+      const dial = this.#dialDiagnostic === null ? null : formatMqttDiagnostic(this.#dialDiagnostic);
+      this.#logger.warn({ err: detail, ...(dial !== null ? { dial } : {}) }, "MQTT client error");
+      if (!isFatalMqttProtocolError(error.message ?? "")) return;
+      // A malformed packet desynchronises mqtt.js's parser. The socket may
+      // remain open, so no `close` event arrives and the realtime channel
+      // silently dies (messages stop arriving, commands stop replying).
+      // Cycle the connection explicitly; the generation guard makes the
+      // resulting close event a no-op.
+      this.#logger.warn({ err: detail }, "MQTT protocol error - cycling connection");
+      this.#handleConnectionEnd(client, generation, `MQTT protocol error: ${detail}`);
+      this.#forceEnd(client);
     });
     client.on("disconnect", () => {
       if (generation !== this.#generation) return;

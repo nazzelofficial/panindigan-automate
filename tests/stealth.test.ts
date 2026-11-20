@@ -32,6 +32,28 @@ function makeGuard(config: Record<string, unknown> = {}) {
   return { guard, storage };
 }
 
+describe("Stealth Guard lifecycle logs", () => {
+  it("announces initialization even on a fresh start with no stored state", async () => {
+    const lines: string[] = [];
+    const captureLogger = createRootLogger({
+      level: "info",
+      prettyPrint: false,
+      logFile: null,
+      transports: [{ write: (line) => lines.push(line) }],
+    });
+    const storage = new MemoryStorage();
+    const guard = new StealthGuard({
+      config: { enabled: true } as never,
+      logger: captureLogger,
+      storage,
+    });
+
+    await guard.initialize();
+
+    expect(lines.join("\n")).toContain("Stealth Guard initialized");
+  });
+});
+
 function signal(severity: SuspensionSignal["severity"], message = "sig"): SuspensionSignal {
   return {
     type: "test",

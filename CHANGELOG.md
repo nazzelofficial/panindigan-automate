@@ -2,6 +2,27 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.7] - 2026-11-20
+
+Patch release: professional logging everywhere, lifecycle visibility, and realtime connection recovery.
+
+### Changed
+
+- Colorized, human-readable logging is now the **default on every host** (local, Render, Docker) — no `pino-pretty` dependency, no TTY requirement. Set `prettyPrint: false` for machine-parsed JSON. The formatter now handles pino's ISO-string timestamps (previously rendered as empty `[]`) and prints Error objects as one readable `err=` field.
+- Upgraded visual style: dim timestamp + colored icon/level badge + `[module]` + lavender message, with semantically colored values (green = ready/enabled, yellow = numbers, cyan = links, magenta = names). Key lifecycle events render as framed status panels — `MQTT CONNECTED`, `REALTIME READY`, `STEALTH GUARD`.
+
+### Fixed
+
+- MQTT parser errors (for example `Invalid header flag bits, must be 0x0 for puback packet`) now cycle the connection instead of leaving an open but dead realtime channel. Previously only a warning was logged; when no `close` event followed, messages and command replies silently stopped.
+- "Messenger realtime connection ready / re-established" is logged at `info` level instead of debug-only, so MQTT connection status is visible with the default log level.
+- Stealth Guard logs `Stealth Guard initialized` on every start, including fresh deployments with no persisted state (previously silent).
+- MQTT client errors now include the last dial diagnostic for correlation.
+
+### Added
+
+- Exported `isFatalMqttProtocolError()` for classifying parser errors that require a reconnect.
+- Tests for default logging, panel rendering, timestamps, error formatting, MQTT diagnostics, and stealth initialization (259 tests, 18 files).
+
 ## [0.2.6] - 2026-11-19
 
 Patch release: MQTT connection diagnostics, cookie export compatibility, and logging improvements.

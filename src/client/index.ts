@@ -1073,6 +1073,29 @@ export class MessengerClient {
         onSyncEstablished: (info) => {
           this.#session.markConnectionEstablished();
           void this.#session.persist();
+          // Visible at the default `info` level. This used to be debug-only,
+          // so "MQTT connected / realtime ready" never appeared in deployment
+          // logs unless debug logging was explicitly turned on.
+          this.#logger.info(
+            {
+              region: this.#session.region ?? "default",
+              reconnect: info.reconnect,
+              attempt: info.attempt,
+              drained: info.drained,
+              panel: {
+                title: info.reconnect ? "REALTIME RECONNECTED" : "REALTIME READY",
+                tone: "success",
+                rows: [
+                  ["Region", this.#session.region ?? "default"],
+                  ["Sync", "Established"],
+                  ["Drained", info.drained],
+                  ["Attempt", info.attempt],
+                ],
+                footer: "github.com/nazzelofficial/panindigan-automate",
+              },
+            },
+            info.reconnect ? "Messenger realtime connection re-established" : "Messenger realtime connection ready",
+          );
           if (info.reconnect) {
             this.#emitter.emitAndForget("reconnect", {
               type: "reconnect",

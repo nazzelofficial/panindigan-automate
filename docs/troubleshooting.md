@@ -100,7 +100,7 @@ import { login } from "panindigan-automate";
 
 const client = await login("./appstate.json", {
   logLevel: "debug",
-  prettyPrint: true, // Needs pino-pretty installed
+  prettyPrint: false, // machine-parsed JSON (colorized output is the default)
 });
 ```
 This logs detailed request payloads, topic subscriptions, and MQTT sequence IDs while masking secret tokens and raw cookie values.

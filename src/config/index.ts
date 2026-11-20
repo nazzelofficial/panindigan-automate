@@ -46,7 +46,10 @@ export interface ResolvedConfig {
 /** Defaults for every scalar option. */
 const DEFAULTS = {
   logLevel: "info",
-  prettyPrint: false,
+  // Professional colorized output is the default on EVERY host (local,
+  // Render, Docker). Raw JSON is available by opting out with
+  // `prettyPrint: false` for log aggregators that need machine parsing.
+  prettyPrint: true,
   logFile: null,
   useConsoleLogger: false,
   httpTimeout: 30_000,

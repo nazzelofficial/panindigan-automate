@@ -66,6 +66,8 @@ const colors = {
   gray: "\x1b[38;5;242m",
   darkGray: "\x1b[38;5;238m",
   lightGray: "\x1b[38;5;250m",
+  message: "\x1b[38;5;189m", // soft lavender — log message text
+  link: "\x1b[38;5;45m", // cyan — URLs in panels
 
   // Backgrounds
   bgSuccess: "\x1b[48;5;46m",
@@ -313,14 +315,62 @@ class MultiDestination {
 
 type PrettyStreamFactory = (options: { colorize: boolean; translateTime: string; ignore: string }) => { write: (line: string) => void };
 
+/** JSON.stringify that never throws on circular or exotic context values. */
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return JSON.stringify(value, (_key, item: unknown) => {
+      if (item !== null && typeof item === "object") {
+        if (seen.has(item)) return "[Circular]";
+        seen.add(item);
+      }
+      return item;
+    }) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * A framed status block attached to a log record through the `panel` field.
+ * JSON transports still receive the ordinary record; only the colorized
+ * destination renders it as a box.
+ */
+export interface LogPanel {
+  readonly title: string;
+  readonly tone?: "success" | "info" | "warning" | "danger";
+  readonly rows: ReadonlyArray<readonly [string, string | number | boolean | null]>;
+  readonly footer?: string;
+}
+
+/** Semantic coloring so values read at a glance (green = good, yellow = number). */
+function colorValue(value: unknown): string {
+  if (typeof value === "boolean") return value ? colors.success : colors.error;
+  if (typeof value === "number") return colors.warning;
+  const text = String(value ?? "—");
+  if (/^(true|enabled|connected|ready|active|ok|yes|closed)$/i.test(text)) return colors.success;
+  if (/^(false|disabled|halted|down|no)$/i.test(text)) return colors.error;
+  if (/^(https?:\/\/|github\.com\/)/i.test(text)) return colors.link;
+  return colors.pink;
+}
+
+const LEVEL_STYLE: Record<number, { icon: string; iconColor: string; label: string; labelColor: string }> = {
+  60: { icon: "✖", iconColor: colors.error, label: "FATAL", labelColor: colors.error },
+  50: { icon: "✖", iconColor: colors.error, label: "ERROR", labelColor: colors.error },
+  40: { icon: "⚠", iconColor: colors.warning, label: "WARN", labelColor: colors.warning },
+  35: { icon: "✓", iconColor: colors.success, label: "OK", labelColor: colors.success },
+  30: { icon: "ℹ", iconColor: colors.info, label: "INFO", labelColor: colors.info },
+  20: { icon: "●", iconColor: colors.purple, label: "DEBUG", labelColor: colors.gray },
+  10: { icon: "›", iconColor: colors.darkGray, label: "TRACE", labelColor: colors.darkGray },
+};
+
 /**
  * Built-in colorized destination for pino's JSON lines.
  *
- * Works with zero external dependencies — `pino-pretty` is optional and
- * often absent in deployments, which used to make `prettyPrint: true` a
- * silent no-op (plain "simple logs"). pino still redacts secrets BEFORE
- * handing us the line, so coloring is safe. Used for local development;
- * production keeps plain redacted JSON unless prettyPrint is requested.
+ * This is the DEFAULT stdout destination on every host — no external
+ * dependency, no TTY requirement, no pino-pretty needed. pino still applies
+ * redaction BEFORE handing us the line, so secrets never reach the formatter.
+ * Set `prettyPrint: false` for machine-parsed JSON (log aggregators).
  */
 export class ColorizedDestination {
   write(line: string): void {
@@ -335,46 +385,97 @@ export class ColorizedDestination {
     }
 
     const level = typeof record["level"] === "number" ? record["level"] : 30;
-    const badge = (() => {
-      switch (level) {
-        case 60: return `${colors.bgError}${colors.bold}\x1b[30m FATAL ${colors.reset}`;
-        case 50: return `${colors.bgError}${colors.bold}\x1b[30m ERROR ${colors.reset}`;
-        case 40: return `${colors.bgWarning}${colors.bold}\x1b[30m WARN  ${colors.reset}`;
-        case 30: return `${colors.bgInfo}${colors.bold}\x1b[30m INFO  ${colors.reset}`;
-        case 20: return `${colors.dim}DEBUG ${colors.reset}`;
-        case 10: return `${colors.darkGray}TRACE ${colors.reset}`;
-        default: return `${colors.info}LOG   ${colors.reset}`;
-      }
-    })();
+    const style = LEVEL_STYLE[level] ?? { icon: "•", iconColor: colors.info, label: "LOG", labelColor: colors.info };
 
-    const time = typeof record["time"] === "number"
-      ? new Date(record["time"]).toISOString().slice(11, 23)
-      : "";
+    // pino's isoTime emits a STRING; numeric timestamps are also accepted.
+    const rawTime = record["time"];
+    const time = typeof rawTime === "number"
+      ? new Date(rawTime).toISOString().slice(11, 23)
+      : typeof rawTime === "string"
+        ? (rawTime.includes("T") ? rawTime.slice(11, 23) : rawTime.slice(0, 12))
+        : "";
+
+    const panel = record["panel"];
+    if (panel !== null && typeof panel === "object" && typeof (panel as LogPanel).title === "string") {
+      process.stdout.write(this.#renderPanel(panel as LogPanel));
+      return;
+    }
+
     const module = typeof record["module"] === "string" ? record["module"] : undefined;
     const msg = typeof record["msg"] === "string" ? record["msg"] : "";
-
-    const reserved = new Set(["level", "time", "msg", "name", "library", "pid", "hostname", "module"]);
+    const reserved = new Set([
+      "level", "time", "msg", "name", "library", "pid", "hostname", "module", "panel",
+    ]);
     const context = Object.entries(record).filter(([key]) => !reserved.has(key));
 
     const parts = [
-      `${colors.gray}[${time}]${colors.reset}`,
-      badge,
-      module ? `${colors.purple}${module}${colors.reset}` : "",
-      `${colors.bold}${msg}${colors.reset}`,
-    ].filter(Boolean);
+      `${colors.darkGray}${time}${colors.reset}`,
+      `${style.iconColor}${style.icon}${colors.reset} ${colors.bold}${style.labelColor}${style.label}${colors.reset}`,
+      module ? `${colors.purple}[${module}]${colors.reset}` : "",
+      msg === "" ? "" : `${colors.message}${msg}${colors.reset}`,
+    ].filter((part): part is string => part !== "");
 
-    let out = parts.join(" ");
+    let out = parts.join("  ");
     if (context.length > 0) {
       const details = context
         .map(([key, value]) => {
-          const text = typeof value === "string" ? value : JSON.stringify(value);
-          return `${colors.dim}${key}${colors.reset}=${colors.lightGray}${text}${colors.reset}`;
+          if (key === "err" && value !== null && typeof value === "object") {
+            const err = value as Record<string, unknown>;
+            const text = typeof err["message"] === "string" ? err["message"] : String(value);
+            const code = typeof err["code"] === "string" ? ` (${err["code"]})` : "";
+            return `${colors.dim}err${colors.reset}=${colors.error}${text}${code}${colors.reset}`;
+          }
+          const text = typeof value === "string" ? value : safeStringify(value);
+          const short = text.length > 200 ? `${text.slice(0, 197)}...` : text;
+          return `${colors.dim}${key}${colors.reset}=${colorValue(value)}${short}${colors.reset}`;
         })
         .join(`${colors.darkGray} · ${colors.reset}`);
       out += `  ${colors.darkGray}${details}${colors.reset}`;
     }
     process.stdout.write(`${out}\n`);
   }
+
+  /** Renders a framed panel with a cyan border and semantically colored values. */
+  #renderPanel(panel: LogPanel): string {
+    const tones = {
+      success: { icon: "✓", color: colors.success },
+      info: { icon: "ℹ", color: colors.info },
+      warning: { icon: "⚠", color: colors.warning },
+      danger: { icon: "✖", color: colors.error },
+    } as const;
+    const tone = tones[panel.tone ?? "info"];
+    const rows = Array.isArray(panel.rows) ? panel.rows : [];
+    const labelWidth = Math.max(12, ...rows.map(([label]) => String(label).length));
+    const width = 58;
+
+    const edge = (left: string, fill: string, right: string): string =>
+      `${colors.link}${left}${fill.repeat(width - 2)}${right}${colors.reset}\n`;
+    const bordered = (content: string): string =>
+      `${colors.link}║${colors.reset}${content}${" ".repeat(Math.max(0, width - 2 - visibleLength(content)))}${colors.link}║${colors.reset}\n`;
+
+    let out = edge("╔", "═", "╗");
+    const heading = `  ${tone.icon} ${panel.title}`;
+    out += bordered(`${tone.color}${colors.bold}${heading}${colors.reset}`);
+    out += edge("╠", "═", "╣");
+    for (const [label, value] of rows) {
+      const key = String(label);
+      const text = value === null ? "—" : String(value);
+      out += bordered(
+        `  ${colors.lightGray}${key.padEnd(labelWidth)}${colors.reset}  ${colorValue(value)}${text}${colors.reset}`,
+      );
+    }
+    if (typeof panel.footer === "string" && panel.footer !== "") {
+      out += edge("╠", "═", "╣");
+      out += bordered(`  ${colors.link}${panel.footer}${colors.reset}`);
+    }
+    out += edge("╚", "═", "╝");
+    return out;
+  }
+}
+
+/** Visible length of a string containing ANSI escape codes. */
+function visibleLength(text: string): number {
+  return text.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
 function loadPrettyStream(): { write: (line: string) => void } | null {

@@ -219,6 +219,28 @@ export class StealthGuard {
         { circuitState: stored.circuitState, warmupDay: stored.warmupDay, signals: this.#state.signals.length },
         "Stealth Guard state restored",
       );
+    } else {
+      // A fresh start (e.g. every Render deploy) previously produced NO
+      // stealth log at all because this branch was missing. Always announce
+      // the guard's state so it is visible it is actually active.
+      this.#logger.info(
+        {
+          enabled: this.#config.enabled,
+          circuitState: this.#state.circuitState,
+          warmupDay: this.#state.warmupDay,
+          panel: {
+            title: "STEALTH GUARD",
+            tone: "success",
+            rows: [
+              ["Status", this.#config.enabled ? "Enabled" : "Disabled"],
+              ["Circuit", this.#state.circuitState],
+              ["Warmup day", this.#state.warmupDay],
+            ],
+            footer: "github.com/nazzelofficial/panindigan-automate",
+          },
+        },
+        "Stealth Guard initialized",
+      );
     }
   }
 
