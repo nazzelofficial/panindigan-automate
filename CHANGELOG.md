@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-11-21
+
+Patch release: fixes profile links resolving to the wrong account.
+
+### Fixed
+
+- Profile URL resolution no longer returns the viewer's own ID from a share page. The `"user_id"` field in Facebook HTML is the logged-in account, so opaque `/share/<code>` links resolved to the bot itself and adding that "member" failed. Only target profile fields (`profile_id`, `target_id`, canonical/og:url meta tags) are used, and the viewer ID is explicitly excluded.
+- Opaque `/share/<code>` links cannot be resolved from the URL alone (the code does not encode the destination). Callers should use the quoted message's attachment metadata (`fbid`), which carries the target's numeric ID, as the authoritative source.
+
 ## [0.3.3] - 2026-11-21
 
 Patch release: broader group-admin parsing and E2EE message support for the bot.

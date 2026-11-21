@@ -155,21 +155,33 @@ export function extractUserIdFromUrl(url: string): string | null {
   }
 }
 
-/** Last-resort extraction of a profile ID from an HTML page body. */
-export function extractUserIdFromHtml(body: string): string | null {
-  // Facebook embeds the viewer/profile id in JSON such as "user_id":"123".
-  // User IDs are typically 14-17 digits; require at least 12 to avoid
-  // unrelated numbers (timestamps are 13 digits but rarely quoted this way).
+/**
+ * Last-resort extraction of a profile ID from an HTML page body.
+ *
+ * IMPORTANT: `"user_id"` in a Facebook page is the VIEWER (the logged-in bot),
+ * not the profile being viewed. Including it made share links resolve to the
+ * bot's own ID, so adding that "member" always failed. Only profile-target
+ * fields are considered here; the viewer id is explicitly excluded.
+ */
+export function extractUserIdFromHtml(body: string, viewerId?: string): string | null {
+  const skip = viewerId !== undefined ? new Set([String(viewerId)]) : new Set<string>();
+  const candidates: string[] = [];
   for (const pattern of [
-    /"user_id"\s*:\s*"(\d{12,20})"/,
     /"profile_id"\s*:\s*"(\d{12,20})"/,
+    /"target_id"\s*:\s*"(\d{12,20})"/,
+    /"profile_id"\s*:\s*(\d{12,20})/,
+    /"target_id"\s*:\s*(\d{12,20})/,
+    /"profileId"\s*:\s*"(\d{12,20})"/,
+    // og:url / canonical meta tags on a share page point at the target profile.
+    /<meta[^>]+(?:property|name)=["']og:url["'][^>]+content=["']https?:\/\/(?:www\.)?facebook\.com\/(\d{12,20})/i,
+    /<link[^>]+rel=["']canonical["'][^>]+href=["']https?:\/\/(?:www\.)?facebook\.com\/(\d{12,20})/i,
     /facebook\.com\/(\d{12,20})(?:\?|\/|")/,
     /profile\.php\?id=(\d{12,20})/,
   ]) {
     const match = body.match(pattern);
-    if (match?.[1]) return match[1];
+    if (match?.[1]) candidates.push(match[1]);
   }
-  return null;
+  return candidates.find((id) => !skip.has(id)) ?? null;
 }
 
 /** How long `login()` waits for the first sync payload before failing. */
@@ -2317,7 +2329,8 @@ export class MessengerClient {
     if (fromUrl !== null) return fromUrl;
 
     // 2) Fall back to the HTML body for embedded profile/user ids.
-    const fromBody = extractUserIdFromHtml(response.body);
+    // Exclude our own id — a share page contains the viewer id, which is us.
+    const fromBody = extractUserIdFromHtml(response.body, this.#session.userId);
     if (fromBody !== null) return fromBody;
 
     throw new APIError(`could not resolve a user ID from "${value}"`, "API_ERROR", {

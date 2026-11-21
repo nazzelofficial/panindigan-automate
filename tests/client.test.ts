@@ -94,8 +94,18 @@ describe("profile URL resolution", () => {
     expect(extractUserIdFromUrl("https://www.facebook.com/share/19wEoLmtBB/")).toBeNull();
   });
 
-  it("extracts a long id from an HTML body", () => {
-    expect(extractUserIdFromHtml('{"user_id":"61596880191204","name":"James"}')).toBe("61596880191204");
+  it("extracts a target profile id and never the viewer's own id", () => {
+    // A share page contains the VIEWER id (the bot) and the target profile id.
+    // Returning the viewer id made add-member add the bot to the group.
+    const body = '{"user_id":"61596880191204","profile_id":"123456789012345","name":"James"}';
+    expect(extractUserIdFromHtml(body, "61596880191204")).toBe("123456789012345");
+    // Without a viewer id it still prefers profile-target fields.
+    expect(extractUserIdFromHtml(body)).toBe("123456789012345");
+  });
+
+  it("returns null rather than the bot's own id when that is the only id present", () => {
+    const body = '{"user_id":"61596880191204","name":"Viewer"}';
+    expect(extractUserIdFromHtml(body, "61596880191204")).toBeNull();
   });
 });
 
