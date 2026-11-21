@@ -11,7 +11,7 @@
 export const LIBRARY_NAME = "panindigan-automate";
 
 /** Library version. Mirrors package.json. */
-export const VERSION = "0.3.1";
+export const VERSION = "0.3.2";
 
 /**
  * Default User-Agent: a reduced Chrome UA string. The major version is kept
@@ -241,8 +241,11 @@ export const STORAGE_KEYS = {
 } as const;
 
 /** How long to wait for the first `/t_ms` before treating a fresh MQTT
- * connection as broken and cycling it. */
-export const TMS_TIMEOUT_MS = 5_000;
+ * connection as broken and cycling it. 5s was too short — a real deployment
+ * saw the first delta arrive after ~6-7s, causing three needless reconnects
+ * before sync stabilized. 15s tolerates that while still catching a dead
+ * queue. */
+export const TMS_TIMEOUT_MS = 15_000;
 
 /** MQTT CONNECT timeout; short so region fallback rotates quickly. */
 export const MQTT_CONNECT_TIMEOUT_MS = 10_000;

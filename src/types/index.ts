@@ -431,6 +431,8 @@ export interface ThreadInfo {
   readonly isGroup: boolean;
   readonly participantIds: readonly string[];
   readonly participants: readonly ThreadParticipant[];
+  /** IDs of the group's administrators (empty for 1:1 threads). */
+  readonly adminIDs: readonly string[];
   readonly unreadCount: number;
   readonly emoji: string | null;
   readonly color: string | null;

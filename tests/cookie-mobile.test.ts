@@ -60,6 +60,28 @@ describe("cookie export compatibility", () => {
     expect(stored).toBe(true);
   });
 
+  it("stores dbln with a /login/device-based/ path without a rejection warning", async () => {
+    // The real deployment shape: a device-login cookie scoped to a sub-path.
+    // Storing it under the root URL made getCookiesSync() never see it.
+    const cookies = await parseCredentials([
+      ...base(),
+      {
+        name: "dbln",
+        value: "device-token",
+        domain: "facebook.com",
+        path: "/login/device-based/",
+        sameSite: "No restriction",
+        expirationDate: future,
+        secure: true,
+        httpOnly: false,
+      },
+    ]);
+    const { logger, lines } = capturingLogger();
+    const store = CookieStore.fromCookies(cookies, logger);
+    expect(lines.join("\n")).not.toContain("rejected");
+    expect(store.toSerialized().cookies.some((c) => c.key === "dbln")).toBe(true);
+  });
+
   it("accepts a desktop AppState array", async () => {
     const cookies = await parseCredentials(base());
     expect(cookies).toHaveLength(3);

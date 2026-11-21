@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-11-21
+
+Patch release: group admin list, cookie-path fix, and fewer needless realtime reconnects.
+
+### Added
+
+- `ThreadInfo.adminIDs: readonly string[]` — the group's administrator IDs, parsed from the modern GraphQL thread node (`admin_ids` list and participant `is_admin` markers). Empty for 1:1 threads or when Facebook omits the field. This is what the bot's `adminlist` / `getadmins` / `promote` / `demote` commands read.
+
+### Fixed
+
+- Admin-listing commands no longer deterministically report "group admin list is unavailable" — the data is now exposed by the client's `getThread()`.
+- **`dbln` is no longer reported as a rejected cookie.** Its real shape has `path=/login/device-based/`; the jar stored it under the root URL where `getCookiesSync()` never sees it. Cookies are now stored under a URL matching their own path, so the export imports 10/10.
+- **Fewer needless MQTT reconnects.** The first `/t_ms` can arrive after ~6-7s; the 5s watchdog cycled the connection three times before stabilizing. Raised to 15s and reworded the warning for clarity.
+
 ## [0.3.1] - 2026-11-21
 
 Patch release: fixes a false-positive account halt and makes the auto-updater honest about hosted environments.

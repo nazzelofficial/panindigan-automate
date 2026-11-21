@@ -123,6 +123,36 @@ describe("thread normalization", () => {
     expect(info?.canReply).toBe(true);
     expect(info?.snippet).toBe("hi");
     expect(info?.updatedAt).toBe(1700000000000);
+    expect(info?.adminIDs).toEqual([]);
+  });
+
+  it("extracts group admin IDs from a top-level admin_ids list", () => {
+    const info = normalizeThread({
+      thread_key: { thread_fbid: "123" },
+      thread_type: "GROUP",
+      all_participants: {
+        edges: [
+          { node: { messaging_actor: { id: "1", name: "Ada", __typename: "User" } } },
+          { node: { messaging_actor: { id: "2", name: "Bob", __typename: "User" } } },
+        ],
+      },
+      admin_ids: [{ id: "1" }, { id: "2" }],
+    });
+    expect(info?.adminIDs).toEqual(["1", "2"]);
+  });
+
+  it("extracts admin IDs from participant is_admin markers", () => {
+    const info = normalizeThread({
+      thread_key: { thread_fbid: "123" },
+      thread_type: "GROUP",
+      all_participants: {
+        edges: [
+          { node: { messaging_actor: { id: "1", name: "Ada" }, is_admin: true } },
+          { node: { messaging_actor: { id: "2", name: "Bob" } } },
+        ],
+      },
+    });
+    expect(info?.adminIDs).toEqual(["1"]);
   });
 
   it("normalizes a legacy search thread", () => {

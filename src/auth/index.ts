@@ -367,10 +367,17 @@ export async function parseCredentials(input: Credentials): Promise<readonly Nor
  */
 function urlForCookie(cookie: NormalizedCookie): string {
   const domain = cookie.domain.replace(/^\./, "");
+  // Store the cookie under a URL whose path matches its own path. tough-cookie
+  // keeps a cookie scoped to e.g. /login/device-based/ but never returns it to
+  // getCookiesSync() on the root URL — which looked like a rejection. This is
+  // the real cause of the "1 of 10 cookies rejected: dbln" warning: dbln is a
+  // device-login cookie with path /login/device-based/, not an auth cookie.
+  const path = cookie.path.startsWith("/") ? cookie.path : "/";
   if (cookie.hostOnly) {
-    return `https://${domain}/`;
+    return `https://${domain}${path}`;
   }
-  return domain.includes("messenger") ? MESSENGER_URL : FACEBOOK_URL;
+  const base = domain.includes("messenger") ? MESSENGER_URL : FACEBOOK_URL;
+  return path === "/" ? base : `${base}${path}`;
 }
 
 /** Builds a tough-cookie `Cookie` from the normalized form. */

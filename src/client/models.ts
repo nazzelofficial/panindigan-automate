@@ -154,6 +154,7 @@ export function normalizeThread(raw: unknown): ThreadInfo | null {
   const customization = asRecord(thread["customization_info"]);
   const participants: ThreadParticipant[] = [];
   const participantIds: string[] = [];
+  const adminIDs: string[] = [];
   const edges = asArray(asRecord(thread["all_participants"])?.["edges"]);
   for (const edgeRaw of edges) {
     const edge = asRecord(edgeRaw);
@@ -164,6 +165,18 @@ export function normalizeThread(raw: unknown): ThreadInfo | null {
       participants.push(participant);
       participantIds.push(participant.id);
     }
+    // Participant-level admin marker (modern GraphQL sometimes carries the
+    // role on the node or the actor rather than a top-level admin_ids list).
+    const adminFlag = node?.["is_admin"] ?? actor?.["is_admin"] ?? node?.["isGroupAdmin"];
+    if (participant !== null && (adminFlag === true || text(node?.["admin_type"]) !== null)) {
+      adminIDs.push(participant.id);
+    }
+  }
+  // Classic FCA shape: top-level `admin_ids` (array of ids or objects).
+  for (const rawAdmin of asArray(thread["admin_ids"])) {
+    const record = asRecord(rawAdmin);
+    const id = record !== null ? firstText(record["id"], record["user_id"], record["profile_id"]) : text(rawAdmin);
+    if (id !== null && !adminIDs.includes(id)) adminIDs.push(id);
   }
 
   const nicknames: Record<string, string> = {};
@@ -197,6 +210,7 @@ export function normalizeThread(raw: unknown): ThreadInfo | null {
     isGroup,
     participantIds,
     participants,
+    adminIDs,
     unreadCount: toNumber(thread["unread_count"]) ?? 0,
     emoji: firstText(customization?.["emoji"]),
     color: normalizeColor(customization?.["outgoing_bubble_color"]),
@@ -260,6 +274,9 @@ export function normalizeLegacyThread(raw: unknown): ThreadInfo | null {
       name: null,
       accountType: null,
     })),
+    adminIDs: asArray(record["admin_ids"])
+      .map((raw) => (asRecord(raw) !== null ? firstText(asRecord(raw)!["id"], asRecord(raw)!["user_id"]) : text(raw)))
+      .filter((id): id is string => id !== null),
     unreadCount: toNumber(record["unread_count"]) ?? 0,
     emoji: firstText(record["custom_like_icon"]),
     color: normalizeColor(record["custom_color"]),

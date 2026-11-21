@@ -1370,9 +1370,12 @@ export class MqttTransport {
       this.#tmsTimer = null;
       const client = this.#client;
       if (client === null) return;
-      this.#logger.warn({}, "no /t_ms arrived after queue creation; cycling connection");
+      this.#logger.warn(
+        { waitedMs: TMS_TIMEOUT_MS, region: this.#preferredRegion ?? "default" },
+        "No /t_ms sync response after creating the queue; reconnecting",
+      );
       this.#runCallback("onWarning", () =>
-        this.#deps.callbacks.onWarning("no /t_ms received after sync queue creation; reconnecting", {}),
+        this.#deps.callbacks.onWarning("No /t_ms sync response after creating the queue; reconnecting", {}),
       );
       this.#forceEnd(client);
     }, TMS_TIMEOUT_MS);
