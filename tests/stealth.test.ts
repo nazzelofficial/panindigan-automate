@@ -60,6 +60,38 @@ describe("AntiDetectionManager logs", () => {
   });
 });
 
+describe("StealthGuard — false-positive halt recovery", () => {
+  it("reopens a circuit opened only by data-plane mqtt_pattern signals", async () => {
+    const storage = new MemoryStorage();
+    const signals: SuspensionSignal[] = Array.from({ length: 3 }, (_, index) => ({
+      type: "mqtt_pattern",
+      severity: "critical",
+      message: "Checkpoint or verification required",
+      timestamp: Date.now() - index * 1000,
+      context: { topic: "/t_ms", pattern: "checkpoint" },
+    }));
+    await storage.set("stealth:state", {
+      circuitState: "open",
+      signals,
+      haltedAt: Date.now() - 60_000,
+      sessionStartMs: Date.now(),
+      warmupDay: 0,
+      hourWindow: [],
+      dayWindow: [],
+    });
+
+    const guard = new StealthGuard({
+      config: { enabled: true, signalThreshold: 3 } as never,
+      logger,
+      storage,
+    });
+    await guard.initialize();
+
+    expect(guard.getState().circuitState).toBe("closed");
+    expect(guard.checkOperation("sendMessage").allowed).toBe(true);
+  });
+});
+
 describe("Stealth Guard lifecycle logs", () => {
   it("announces initialization even on a fresh start with no stored state", async () => {
     const lines: string[] = [];

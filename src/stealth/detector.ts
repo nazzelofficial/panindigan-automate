@@ -200,10 +200,13 @@ export class SuspensionDetector {
       }
     }
 
-    // Text patterns are only meaningful on the control plane; the data
-    // plane carries user content, where a word like "spam" in chat must
-    // never halt the bot. Restrict the scan accordingly.
-    if (/^\/(t_ms|ls_req|ls_resp|orca_|foreground_state|browser_close)/.test(topic)) {
+    // Text patterns are only meaningful on the CONTROL plane. `/t_ms` and
+    // `/orca_*` are data-plane topics — they carry message bodies and user
+    // content, so a chat message containing a word like "checkpoint" or
+    // "session expired" must never produce a critical suspension signal.
+    // The real 0.3.0 deployment hit this: repeated "mqtt_pattern" critical
+    // signals halted commands for 24 hours even though nothing was wrong.
+    if (/^\/(ls_req|ls_resp|foreground_state|browser_close)/.test(topic)) {
       const text = JSON.stringify(payload);
       for (const { pattern, severity, message } of RESTRICTION_PATTERNS) {
         if (pattern.test(text)) {

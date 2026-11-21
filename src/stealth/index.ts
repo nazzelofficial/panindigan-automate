@@ -203,10 +203,35 @@ export class StealthGuard {
   async initialize(): Promise<void> {
     const stored = await this.#storage.get<StealthState>("stealth:state");
     if (stored !== null) {
+      // Discard signals that were provably false positives: text-pattern
+      // matches on data-plane MQTT topics (/t_ms, /orca_*) are user message
+      // content, not Facebook restriction notices. Left in place they keep
+      // the circuit halted for 24h even after the detector is fixed.
+      const cleaned = stored.signals.filter((signal) => {
+        if (signal.type !== "mqtt_pattern") return true;
+        const topic = signal.context["topic"];
+        return typeof topic !== "string" || !/^\/(t_ms|orca_)/.test(topic);
+      });
+      const dropped = stored.signals.length - cleaned.length;
+      if (dropped > 0) {
+        this.#logger.warn(
+          { dropped },
+          "Discarded persisted false-positive suspension signals from data-plane MQTT topics",
+        );
+      }
+      const remainingHalting = cleaned.filter(
+        (signal) => signal.severity === "halt" || signal.severity === "critical",
+      );
+      // If the only signals that opened the circuit were false positives,
+      // clear the halt now instead of freezing a healthy account for 24h.
+      const reopen = dropped > 0 && stored.circuitState === "open" && remainingHalting.length < this.#config.signalThreshold;
+      if (reopen) {
+        this.#logger.warn("Reopening the circuit — it was opened only by false-positive data-plane signals");
+      }
       this.#state = {
-        circuitState: stored.circuitState,
-        signals: stored.signals.slice(-MAX_PERSISTED_SIGNALS),
-        haltedAt: stored.haltedAt,
+        circuitState: reopen ? "closed" : stored.circuitState,
+        signals: cleaned.slice(-MAX_PERSISTED_SIGNALS),
+        haltedAt: reopen ? null : stored.haltedAt,
         sessionStartMs: stored.sessionStartMs,
         warmupDay: stored.warmupDay,
         hourWindow: stored.hourWindow,

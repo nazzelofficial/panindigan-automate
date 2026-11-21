@@ -107,7 +107,7 @@ export type { AntiDetectionConfig, DeviceFingerprint } from "./stealth/index.js"
 
 // Update checker — automatic and on by default since 0.2.0 (backup + rollback; restart required);
 // opt out with `update: { enabled: false }` or `autoInstall: false`.
-export { UpdateChecker, isOlder, DEFAULT_UPDATE_CONFIG } from "./update/index.js";
+export { UpdateChecker, isOlder, DEFAULT_UPDATE_CONFIG, canInstallAtRuntime } from "./update/index.js";
 export type {
   UpdateCheckerOptions,
   UpdateInfo,

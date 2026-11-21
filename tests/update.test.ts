@@ -5,10 +5,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   DEFAULT_UPDATE_CONFIG,
   UpdateChecker,
   isOlder,
+  canInstallAtRuntime,
 } from "../src/update/index.js";
 import { DiagnosticsCollector } from "../src/diagnostics/index.js";
 import { MemoryStorage } from "../src/storage/index.js";
@@ -242,6 +246,34 @@ describe("automatic update checker (stubbed registry)", () => {
 
     expect(info).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("canInstallAtRuntime — honest runtime-update preflight", () => {
+  it("reports a writable project as installable", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "panindigan-upd-"));
+    try {
+      await writeFile(join(dir, "package.json"), "{}");
+      await mkdir(join(dir, "node_modules"));
+      const result = await canInstallAtRuntime(dir);
+      expect(result.possible).toBe(true);
+      expect(result.reason).toBeNull();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an unwritable package.json as not installable with an actionable reason", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "panindigan-upd-"));
+    try {
+      // No package.json at all — access(W_OK) fails, which is the same
+      // signal a read-only container layer gives.
+      const result = await canInstallAtRuntime(dir);
+      expect(result.possible).toBe(false);
+      expect(result.reason).toContain("Redeploy");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

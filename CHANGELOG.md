@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-21
+
+Patch release: fixes a false-positive account halt and makes the auto-updater honest about hosted environments.
+
+### Fixed
+
+- **Chat messages can no longer halt the account (24h).** The 0.3.0 deployment scanned `/t_ms` and `/orca_*` — data-plane MQTT topics that carry message bodies — with Facebook restriction patterns. Ordinary words like "checkpoint" or "session expired" in a chat message produced `mqtt_pattern` critical signals, which opened the circuit and blocked every command with "Account protection active — halted for 1440 more minutes". Text-pattern scanning is now limited to genuine control-plane topics.
+- **A circuit opened only by those false positives is now cleared on startup.** Persisted `mqtt_pattern` signals from `/t_ms` or `/orca_*` are discarded during `initialize()`, and the circuit is reopened if that was the sole cause. The bot resumes commands after upgrade instead of waiting out the 24h cooldown.
+- Real restriction codes (e.g. 1357004) and control-plane restrictions are still detected.
+- **Auto-update no longer reports a false success on hosted deployments.** A runtime `pnpm add` cannot persist in a container (non-root user, read-only root-owned `node_modules`, frozen lockfile). The updater now runs a preflight (`canInstallAtRuntime()`) and, when the install root is not writable, reports a clear actionable error — "redeploy with the new version instead" — instead of claiming it installed something.
+- **`autoRestart` was a documented but dead option.** It is now wired: after a successful install it exits once (guarded by a per-version storage marker to prevent restart loops) so the platform's process manager loads the new version. It remains opt-in (default `false`).
+
+### Added
+
+- `canInstallAtRuntime()` export and regression tests for the preflight, data-plane detection, and persisted halt recovery.
+
 ## [0.3.0] - 2026-11-20
 
 Patch release: login redirect handling and MQTT handshake/parser errors traced to their actual causes in the latest deployment logs.

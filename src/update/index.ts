@@ -19,7 +19,8 @@
  */
 
 import { exec } from "node:child_process";
-import { rename, rm, stat, readFile, readdir } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, rename, rm, stat, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Logger } from "../logger/index.js";
 import type { StorageAdapter } from "../types/index.js";
@@ -174,6 +175,41 @@ export async function installPackageVersion(
     const message = errorMessage(error);
     return { success: false, stderr: message, error: message };
   }
+}
+
+/**
+ * Preflight for runtime self-updates. A process can only hot-swap its own
+ * package when its install root is writable. Container hosts (Render/Docker)
+ * run as a non-root user against a root-owned, read-only `node_modules` built
+ * from a frozen lockfile — a runtime `pnpm add` there cannot work and any
+ * change is discarded on restart. Detect that up front so the checker reports
+ * an honest, actionable error instead of a false success.
+ */
+export async function canInstallAtRuntime(cwd: string = process.cwd()): Promise<{
+  possible: boolean;
+  reason: string | null;
+}> {
+  const pkgJson = join(cwd, "package.json");
+  const nodeModules = join(cwd, "node_modules");
+  try {
+    await access(pkgJson, fsConstants.W_OK);
+  } catch {
+    return {
+      possible: false,
+      reason:
+        "package.json is not writable by this user — a runtime update cannot persist. Redeploy with the new version instead.",
+    };
+  }
+  try {
+    await access(nodeModules, fsConstants.W_OK);
+  } catch {
+    return {
+      possible: false,
+      reason:
+        "node_modules is not writable by this user (read-only container layer / frozen lockfile). Runtime self-update is not possible here — redeploy with the new version instead.",
+    };
+  }
+  return { possible: true, reason: null };
 }
 
 export const DEFAULT_UPDATE_CONFIG: Readonly<Required<Omit<UpdateCheckerOptions, "packageManager" | "releaseChannel" | "timeout">>> = Object.freeze({
@@ -399,6 +435,21 @@ export class UpdateChecker {
       return false;
     }
 
+    // Preflight: never claim an update is installable when the install root
+    // is read-only (container hosts). Report the real, actionable reason.
+    const environment = await canInstallAtRuntime(process.cwd());
+    if (!environment.possible) {
+      const reason = environment.reason ?? "runtime update is not possible";
+      this.#logger.error({ reason, from: this.#version, to: targetVersion }, "Runtime update not possible");
+      this.#status = {
+        ...this.#status,
+        installationStatus: "failed",
+        installationError: reason,
+      };
+      this.#pushHistory({ timestamp: new Date(), from: this.#version, to: targetVersion, success: false, error: reason });
+      return false;
+    }
+
     this.#isInstalling = true;
     this.#status = { ...this.#status, installationStatus: "installing", installationError: null };
 
@@ -460,6 +511,19 @@ export class UpdateChecker {
           success: true,
           error: null,
         });
+
+        // autoRestart was a documented but dead option. When enabled, exit
+        // so the platform's process manager starts the new version. Guard
+        // against a restart loop with a storage marker for the target version.
+        if (this.#config.autoRestart) {
+          const restartKey = `update:restartedTo:${targetVersion}`;
+          const alreadyRestarted = await this.#storage.get<boolean>(restartKey);
+          if (alreadyRestarted !== true) {
+            await this.#storage.set(restartKey, true);
+            this.#logger.warn({ to: targetVersion }, "autoRestart enabled — exiting so the new version loads");
+            setTimeout(() => process.exit(0), 250).unref?.();
+          }
+        }
 
         return true;
       }
