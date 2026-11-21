@@ -140,6 +140,38 @@ import type {
   UserSearchResult,
 } from "../types/index.js";
 
+/** Extracts a numeric Facebook user ID from a resolved profile URL. */
+export function extractUserIdFromUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const id = parsed.searchParams.get("id");
+    if (id !== null && /^\d+$/.test(id)) return id;
+    // /users/123, /profile.php?id=123, /123 (but not /share/<code>).
+    const match = parsed.pathname.match(/\/(?:users\/|user\/)?(\d+)(?:\/|$)/);
+    if (match?.[1]) return match[1];
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Last-resort extraction of a profile ID from an HTML page body. */
+export function extractUserIdFromHtml(body: string): string | null {
+  // Facebook embeds the viewer/profile id in JSON such as "user_id":"123".
+  // User IDs are typically 14-17 digits; require at least 12 to avoid
+  // unrelated numbers (timestamps are 13 digits but rarely quoted this way).
+  for (const pattern of [
+    /"user_id"\s*:\s*"(\d{12,20})"/,
+    /"profile_id"\s*:\s*"(\d{12,20})"/,
+    /facebook\.com\/(\d{12,20})(?:\?|\/|")/,
+    /profile\.php\?id=(\d{12,20})/,
+  ]) {
+    const match = body.match(pattern);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
 /** How long `login()` waits for the first sync payload before failing. */
 const LOGIN_SYNC_TIMEOUT_MS = 30_000;
 
@@ -2257,6 +2289,41 @@ export class MessengerClient {
       });
     }
     return info;
+  }
+
+  /**
+   * Resolves a Facebook profile URL (including opaque `/share/<code>` links,
+   * `profile.php?id=`, vanity URLs, and plain numeric IDs) to a numeric user
+   * ID using the authenticated session. Follows Facebook's redirects and
+   * reads the ID from the final URL or the page body.
+   */
+  async resolveProfileId(input: string): Promise<string> {
+    const value = input.trim();
+    if (/^\d+$/.test(value)) return value;
+
+    const http = this.#requireHttp();
+    // Normalize share links and ensure an absolute URL.
+    let url = value;
+    if (url.startsWith("facebook.com/") || url.startsWith("www.facebook.com/")) {
+      url = `https://${url}`;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      throw new ValidationError("not a valid profile URL or user ID", { context: { input: value } });
+    }
+    const response = await http.get("resolveProfile", url, { withDefaults: false });
+
+    // 1) Final URL after redirects: /profile.php?id=123, /users/123, /123.
+    const fromUrl = extractUserIdFromUrl(response.url);
+    if (fromUrl !== null) return fromUrl;
+
+    // 2) Fall back to the HTML body for embedded profile/user ids.
+    const fromBody = extractUserIdFromHtml(response.body);
+    if (fromBody !== null) return fromBody;
+
+    throw new APIError(`could not resolve a user ID from "${value}"`, "API_ERROR", {
+      retryable: false,
+      context: { input: value, finalUrl: response.url },
+    });
   }
 
   /** Searches contacts by name. */

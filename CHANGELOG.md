@@ -1,6 +1,19 @@
--# Changelog
+# Changelog
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
+
+## [0.3.3] - 2026-11-21
+
+Patch release: broader group-admin parsing and E2EE message support for the bot.
+
+### Fixed
+
+- `ThreadInfo.adminIDs` now parses more admin-list shapes from the modern GraphQL thread response: `admin_ids`, `thread_admin_ids`, `admins`, `thread_admins`, `admin_list`, plus participant `is_admin` markers. Admin lists are now returned instead of being reported unavailable when Facebook uses a different field than the original `admin_ids`.
+- Added `resolveProfileId()` — resolves opaque `/share/<code>` links, `profile.php?id=`, vanity URLs, and numeric IDs to a user ID using the authenticated session. Exports `extractUserIdFromUrl()` and `extractUserIdFromHtml()` helpers.
+
+### Notes
+
+- The companion bot now supports end-to-end encrypted conversations via `e2ee: "auto"` and the `e2ee_message` event. E2EE remains experimental and 1:1-text-only.
 
 ## [0.3.2] - 2026-11-21
 
@@ -8,11 +21,11 @@ Patch release: group admin list, cookie-path fix, and fewer needless realtime re
 
 ### Added
 
-- `ThreadInfo.adminIDs: readonly string[]` — the group's administrator IDs, parsed from the modern GraphQL thread node (`admin_ids` list and participant `is_admin` markers). Empty for 1:1 threads or when Facebook omits the field. This is what the bot's `adminlist` / `getadmins` / `promote` / `demote` commands read.
+- `ThreadInfo.adminIDs: readonly string[]` — the group's administrator IDs, parsed from the modern GraphQL thread node (`admin_ids` list and participant `is_admin` markers). Empty for 1:1 threads or when Facebook omits the field.
 
 ### Fixed
 
-- Admin-listing commands no longer deterministically report "group admin list is unavailable" — the data is now exposed by the client's `getThread()`.
+- Group administrator lists are now exposed by the client's `getThread()` instead of always being reported unavailable.
 - **`dbln` is no longer reported as a rejected cookie.** Its real shape has `path=/login/device-based/`; the jar stored it under the root URL where `getCookiesSync()` never sees it. Cookies are now stored under a URL matching their own path, so the export imports 10/10.
 - **Fewer needless MQTT reconnects.** The first `/t_ms` can arrive after ~6-7s; the 5s watchdog cycled the connection three times before stabilizing. Raised to 15s and reworded the warning for clarity.
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { MessengerClient } from "../src/client/index.js";
+import { extractUserIdFromUrl, extractUserIdFromHtml } from "../src/index.js";
 import {
   messageEventFromNode,
   messageFromEvent,
@@ -82,6 +83,22 @@ describe("MessengerClient construction", () => {
   });
 });
 
+describe("profile URL resolution", () => {
+  it("extracts an id from profile.php?id= and /users/ URLs", () => {
+    expect(extractUserIdFromUrl("https://www.facebook.com/profile.php?id=123456789")).toBe("123456789");
+    expect(extractUserIdFromUrl("https://www.facebook.com/users/987654321")).toBe("987654321");
+    expect(extractUserIdFromUrl("https://www.facebook.com/5555555555")).toBe("5555555555");
+  });
+
+  it("does not mistake an opaque share code for a user id", () => {
+    expect(extractUserIdFromUrl("https://www.facebook.com/share/19wEoLmtBB/")).toBeNull();
+  });
+
+  it("extracts a long id from an HTML body", () => {
+    expect(extractUserIdFromHtml('{"user_id":"61596880191204","name":"James"}')).toBe("61596880191204");
+  });
+});
+
 describe("thread normalization", () => {
   it("normalizes a GraphQL thread node", () => {
     const info = normalizeThread({
@@ -153,6 +170,21 @@ describe("thread normalization", () => {
       },
     });
     expect(info?.adminIDs).toEqual(["1"]);
+  });
+
+  it("extracts admins from a thread_admins connection", () => {
+    const info = normalizeThread({
+      thread_key: { thread_fbid: "123" },
+      thread_type: "GROUP",
+      thread_admins: {
+        edges: [
+          { node: { id: "10", __typename: "User" } },
+          { node: { id: "11", __typename: "User" } },
+        ],
+      },
+      all_participants: { edges: [] },
+    });
+    expect(info?.adminIDs).toEqual(["10", "11"]);
   });
 
   it("normalizes a legacy search thread", () => {

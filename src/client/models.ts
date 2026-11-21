@@ -172,11 +172,30 @@ export function normalizeThread(raw: unknown): ThreadInfo | null {
       adminIDs.push(participant.id);
     }
   }
-  // Classic FCA shape: top-level `admin_ids` (array of ids or objects).
-  for (const rawAdmin of asArray(thread["admin_ids"])) {
-    const record = asRecord(rawAdmin);
-    const id = record !== null ? firstText(record["id"], record["user_id"], record["profile_id"]) : text(rawAdmin);
-    if (id !== null && !adminIDs.includes(id)) adminIDs.push(id);
+  // All known admin-list shapes across FCA versions:
+  // - classic `admin_ids` (array of ids or {id} objects)
+  // - `thread_admins` / `admins` connections with `{node: {...}}` edges
+  // - `admin_ids` nested under `thread` details
+  for (const key of ["admin_ids", "thread_admin_ids", "admins"]) {
+    for (const rawAdmin of asArray(thread[key])) {
+      const record = asRecord(rawAdmin);
+      const id = record !== null
+        ? firstText(record["id"], record["user_id"], record["profile_id"], record["fbid"])
+        : text(rawAdmin);
+      if (id !== null && !adminIDs.includes(id)) adminIDs.push(id);
+    }
+  }
+  for (const key of ["thread_admins", "admin_list"]) {
+    const connection = asRecord(thread[key]);
+    for (const edgeRaw of [
+      ...asArray(connection?.["edges"]),
+      ...asArray(thread[key]),
+    ]) {
+      const edge = asRecord(edgeRaw);
+      const node = edge !== null ? (asRecord(edge["node"]) ?? edge) : null;
+      const id = node !== null ? firstText(node["id"], node["user_id"], node["fbid"], node["profile_id"]) : null;
+      if (id !== null && !adminIDs.includes(id)) adminIDs.push(id);
+    }
   }
 
   const nicknames: Record<string, string> = {};

@@ -10,7 +10,11 @@
  * does the same in ESM.
  */
 
-export { MessengerClient } from "./client/index.js";
+export {
+  MessengerClient,
+  extractUserIdFromUrl,
+  extractUserIdFromHtml,
+} from "./client/index.js";
 export { login } from "./login.js";
 export type { LoginCallback } from "./login.js";
 
