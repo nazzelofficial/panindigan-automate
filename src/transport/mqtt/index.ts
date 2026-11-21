@@ -210,6 +210,47 @@ export function isValidMqttWsUrl(value: string): boolean {
   }
 }
 
+/**
+ * Normalizes invalid PUBACK header flags in a raw MQTT byte stream, in place.
+ *
+ * Facebook's broker occasionally sends a PUBACK fixed header whose low nibble
+ * is non-zero. mqtt.js rejects that with "Invalid header flag bits, must be
+ * 0x0 for puback packet" even though the ACK is otherwise usable. This runs on
+ * the WebSocket 'message' event BEFORE mqtt.js's parser sees the same
+ * ArrayBuffer, so the warning never occurs — no library internals are patched.
+ */
+export function normalizeMqttFrameFlags(data: ArrayBuffer | Uint8Array): void {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  let offset = 0;
+  while (offset + 1 < bytes.length) {
+    const type = bytes[offset]! >> 4;
+    const flags = bytes[offset]! & 0x0f;
+    // MQTT 3.1/3.1.1 require zero flags for PUBACK (type 4). The broker's
+    // non-zero value carries no meaning, so clear only those four bits.
+    if (type === 4 && flags !== 0) {
+      bytes[offset] = 0x40;
+    }
+    // Decode the MQTT remaining-length varint (1-4 bytes) to find the next
+    // frame. Stop defensively on malformed or oversized data.
+    let multiplier = 1;
+    let remaining = 0;
+    let lengthBytes = 0;
+    let index = offset + 1;
+    while (index < bytes.length && lengthBytes < 4) {
+      const byte = bytes[index]!;
+      remaining += (byte & 0x7f) * multiplier;
+      lengthBytes += 1;
+      index += 1;
+      if ((byte & 0x80) === 0) break;
+      multiplier *= 128;
+    }
+    if (lengthBytes === 4 && (bytes[index - 1]! & 0x80) !== 0) return;
+    const next = index + remaining;
+    if (!Number.isFinite(next) || next > bytes.length || next <= offset) return;
+    offset = next;
+  }
+}
+
 /** Fired once the sync channel is up: the first `/t_ms` arrived. */
 export interface SyncEstablishedInfo {
   /** Whether this is a re-establishment after a drop. */
@@ -848,9 +889,9 @@ export class MqttTransport {
               agent: createWsProxyAgent(proxy, { timeoutMs: MQTT_CONNECT_TIMEOUT_MS }),
             };
 
-      // Our CONNECT is always MQIsdp/3, so mqtt.js negotiates mqttv3.1.
+      // No sub-protocol is requested — the broker sends none back.
       advance("websocket-create", {
-        subProtocol: "mqttv3.1",
+        subProtocol: null,
         handshakeHeaders: safeHandshakeHeaders(headers),
       });
       const options: IClientOptions = {
@@ -865,15 +906,20 @@ export class MqttTransport {
         // The transport owns reconnection; never let mqtt.js retry on its own.
         reconnectPeriod: 0,
         wsOptions,
-        // Keep mqtt.js's OWN negotiated sub-protocol list. For MQIsdp/3 that
-        // is ["mqttv3.1"]. The deployment that stayed online (before 0.2.6)
-        // used mqtt.js's default builder, which sends this header; the variant
-        // that sent no header achieved CONNACK but then hit repeated PUBACK
-        // parser errors on every region. Negotiating mqttv3.1 tells the broker
-        // this client speaks MQTT 3.1, so it frames ACK packets accordingly.
-        // The override exists only to attach the diagnostic listeners below.
-        createWebsocket: (wsUrl: string, protocols: string[], wsOpts: IClientOptions) => {
-          const socket = new WebSocket(wsUrl, protocols, wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+        // Latest deployment evidence: requesting mqttv3.1 closed every region
+        // with 1006 "Server sent no subprotocol"; sending none reached CONNACK.
+        // The invalid PUBACK flags are normalized at the message boundary so
+        // mqtt.js never emits the parser warning either.
+        createWebsocket: (wsUrl: string, _protocols: string[], wsOpts: IClientOptions) => {
+          const socket = new WebSocket(wsUrl, undefined, wsOpts.wsOptions as WebSocket.ClientOptions ?? {});
+          // This listener is registered before mqtt.js attaches its own, so
+          // the same ArrayBuffer is fixed before the parser reads it. No
+          // mqtt.js internals are modified.
+          (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void })
+            .on("message", (data: unknown) => {
+              if (data instanceof ArrayBuffer) normalizeMqttFrameFlags(data);
+              else if (data instanceof Uint8Array) normalizeMqttFrameFlags(data);
+            });
           (socket as unknown as { on: (event: string, listener: (...args: any[]) => void) => void }).on("upgrade", (response: unknown) => {
             const res = response as { statusCode?: unknown; statusMessage?: unknown };
             advance("websocket-upgrade", {

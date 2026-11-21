@@ -423,6 +423,7 @@ export class CookieStore {
     const isExpired = (cookie: NormalizedCookie): boolean =>
       cookie.expiresAtMs !== null && cookie.expiresAtMs <= Date.now();
 
+    const thrown: Array<{ name: string; reason: string }> = [];
     for (const cookie of cookies) {
       const toughCookie = toToughCookie(cookie);
       const url = urlForCookie(cookie);
@@ -432,6 +433,7 @@ export class CookieStore {
         // Explicit rejection (e.g., invalid domain, path). Cookie names and
         // domains are safe; values are never logged.
         const reason = err instanceof Error ? err.message : String(err);
+        thrown.push({ name: cookie.name, reason });
         this.#logger?.warn(
           { cookie: cookie.name, domain: cookie.domain, err: reason },
           "Cookie rejected by the cookie jar",
@@ -454,8 +456,24 @@ export class CookieStore {
     }
 
     if (rejectedNames.length > 0) {
+      // Capture the ACTUAL shape so the next deployment can identify the
+      // cause. Cookie values are never included — only attributes.
+      const details = rejectedNames.map((name) => {
+        const cookie = cookies.find((candidate) => candidate.name === name)!;
+        const explicit = thrown.find((entry) => entry.name === name);
+        return {
+          name,
+          domain: cookie.domain,
+          path: cookie.path,
+          hostOnly: cookie.hostOnly,
+          secure: cookie.secure,
+          sameSite: cookie.sameSite ?? "none",
+          storedUnder: urlForCookie(cookie),
+          ...(explicit !== undefined ? { error: explicit.reason } : {}),
+        };
+      });
       this.#logger?.warn(
-        { count: rejectedNames.length, total: cookies.length, names: rejectedNames },
+        { count: rejectedNames.length, total: cookies.length, names: rejectedNames, details },
         `${rejectedNames.length} of ${cookies.length} cookies were rejected by the cookie jar`,
       );
     }

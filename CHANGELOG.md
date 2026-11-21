@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-11-20
+
+Patch release: login redirect handling and MQTT handshake/parser errors traced to their actual causes in the latest deployment logs.
+
+### Fixed
+
+- **The login GET no longer fails on Facebook's legitimate redirect hops.** The deployment had `PANINDIGAN_HTTP_MAX_REDIRECTS=5`, which produced `Redirect limit (5) exceeded during "login"` even though the library default is 10. Budgets below 10 are now clamped to 10 (an explicit `0` still disables redirects). `#scrapeTokens` keeps its modern `/` request with `withDefaults: false` — `#buildHeaders` already sends the browser-like `Accept` header, so changing the URL was unnecessary.
+- **Exact-URL redirect loop detection.** A revisited URL now fails immediately with `Redirect loop detected` and the full chain in the error context. Unlike the removed host+path check, a legitimate revisit of `/` with a fresh query string is not flagged.
+- **MQTT handshake no longer requests a sub-protocol.** Latest deployment evidence: requesting `mqttv3.1` closed all eight regions with 1006 `Server sent no subprotocol`; sending none reached `upgradeStatus=101` and `CONNACK returnCode=0`. The transport discards mqtt.js's computed list.
+- **Invalid PUBACK flags are normalized before mqtt.js parses them.** Facebook's broker sometimes sends a PUBACK fixed header with non-zero flag bits, which produced `Invalid header flag bits, must be 0x0 for puback packet`. A listener registered before mqtt.js's parser now clears those bits in the same ArrayBuffer, so the warning is eliminated rather than merely tolerated. Other packet types and valid frames are untouched.
+- The dial diagnostic reports `subProtocol` as `null` when none is requested, instead of assuming `mqttv3.1`.
+- A rejected cookie now logs its actual attributes (domain, path, hostOnly, secure, sameSite, storage URL) and the jar's error when one was thrown. The `dbln` warning in 0.2.9 showed a shape not covered by the earlier host-only fix; this reports the real cause rather than guessing.
+
+### Notes
+
+- The `dbln` cookie warning and the cookie-jar/anti-detection logging fixes from 0.2.9 remain in place.
+- Facebook-side session rejection (1357004, a real login-page redirect for an expired session) still requires a fresh cookie export — no client code can revive it.
+
 ## [0.2.9] - 2026-11-20
 
 Patch release: professional logging, plus two regressions that broke previously working connections.

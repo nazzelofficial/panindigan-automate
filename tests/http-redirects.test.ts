@@ -21,6 +21,21 @@ describe("HTTP redirect handling", () => {
     expect(resolveConfig().httpMaxRedirects).toBe(10);
   });
 
+  it("clamps a too-small redirect budget instead of failing a working session", () => {
+    // Render had PANINDIGAN_HTTP_MAX_REDIRECTS=5, producing the observed
+    // "Redirect limit (5) exceeded during login" on a valid session.
+    expect(resolveConfig({ httpMaxRedirects: 5 }).httpMaxRedirects).toBe(10);
+    expect(resolveConfig({ httpMaxRedirects: 15 }).httpMaxRedirects).toBe(15);
+    expect(resolveConfig({ httpMaxRedirects: 0 }).httpMaxRedirects).toBe(0);
+  });
+
+  it("reports an exact-URL redirect loop with its chain", () => {
+    const chain = ["https://www.facebook.com/", "https://www.facebook.com/?a=1", "https://www.facebook.com/"];
+    const error = redirectFailure("login", 10, chain[2]!, false, false, chain, true);
+    expect(error.message).toContain("Redirect loop detected");
+    expect((error as { context: { chain: string[] } }).context.chain).toEqual(chain);
+  });
+
   it("recognizes login and checkpoint redirect targets", () => {
     expect(isLoginRedirect("https://www.facebook.com/login.php?next=%2F")).toBe(true);
     expect(isLoginRedirect("https://www.facebook.com/checkpoint/")).toBe(true);

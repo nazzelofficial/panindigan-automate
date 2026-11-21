@@ -283,22 +283,36 @@ export function redirectFailure(
   finalUrl: string,
   sawLogin: boolean,
   streaming: boolean,
+  chain: readonly string[] = [],
+  loop: boolean = false,
 ): LibraryError {
+  const context = {
+    operation,
+    finalUrl,
+    redirectLimit: limit,
+    loop,
+    chain: [...chain],
+    ...(streaming ? { streaming: true } : {}),
+  };
   if (sawLogin) {
     return new AuthenticationError(
-      `Session is no longer valid — "${operation}" was redirected to Facebook's login page after ${limit} redirects. ` +
+      `Session is no longer valid — "${operation}" was redirected to Facebook's login page. ` +
         `Re-export cookies from a browser that is currently logged in.`,
       "AUTH_SESSION_EXPIRED",
-      {
-        retryable: false,
-        context: { operation, finalUrl, redirectLimit: limit, ...(streaming ? { streaming: true } : {}) },
-      },
+      { retryable: false, context },
+    );
+  }
+  if (loop) {
+    return new TransportError(
+      `Redirect loop detected ${streaming ? "while streaming" : "during"} "${operation}"`,
+      "TRANSPORT_ERROR",
+      { context },
     );
   }
   return new TransportError(
     `Redirect limit (${limit}) exceeded ${streaming ? "while streaming" : "during"} "${operation}"`,
     "TRANSPORT_ERROR",
-    { context: { operation, finalUrl, redirectLimit: limit } },
+    { context },
   );
 }
 
@@ -556,6 +570,10 @@ export class HttpTransport {
     let currentUrl = target;
     let redirectsLeft = this.#config.httpMaxRedirects;
     let sawLogin = false;
+    // Exact-URL loop detection: host+path alone was too aggressive because
+    // Facebook legitimately revisits "/" with a fresh query string.
+    const visited = new Set<string>([currentUrl]);
+    const chain: string[] = [currentUrl];
     for (;;) {
       const requestHeaders: Record<string, string> = {
         ...context.mutatedHeaders(),
@@ -584,8 +602,11 @@ export class HttpTransport {
         await response.body.dump().catch(() => undefined);
         const nextUrl = new URL(location, currentUrl).toString();
         if (isLoginRedirect(nextUrl)) sawLogin = true;
-        if (redirectsLeft <= 0) {
-          const error = redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, true);
+        chain.push(nextUrl);
+        const loop = visited.has(nextUrl);
+        visited.add(nextUrl);
+        if (loop || redirectsLeft <= 0) {
+          const error = redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, true, chain, loop);
           context.error = error;
           await this.#middleware.runError(context);
           throw error;
@@ -824,6 +845,10 @@ export class HttpTransport {
     let currentHeaders: Readonly<Record<string, string>> = headers;
     let redirectsLeft = this.#config.httpMaxRedirects;
     let sawLogin = false;
+    // Exact URLs only — a fresh query string on a revisited path is a
+    // legitimate Facebook hop, not a loop.
+    const visited = new Set<string>([currentUrl]);
+    const chain: string[] = [currentUrl];
 
     for (;;) {
       const requestHeaders: Record<string, string> = {
@@ -851,8 +876,11 @@ export class HttpTransport {
         await response.body.dump().catch(() => undefined);
         const nextUrl = new URL(location, currentUrl).toString();
         if (isLoginRedirect(nextUrl)) sawLogin = true;
-        if (redirectsLeft <= 0) {
-          throw redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, false);
+        chain.push(nextUrl);
+        const loop = visited.has(nextUrl);
+        visited.add(nextUrl);
+        if (loop || redirectsLeft <= 0) {
+          throw redirectFailure(operation, this.#config.httpMaxRedirects, nextUrl, sawLogin, false, chain, loop);
         }
         redirectsLeft -= 1;
         if (response.statusCode === 303 || ((response.statusCode === 301 || response.statusCode === 302) && currentMethod === "POST")) {

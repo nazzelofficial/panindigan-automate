@@ -11,6 +11,7 @@ import {
   formatMqttDiagnostic,
   sanitizeMqttDiagnosticText,
   isValidMqttWsUrl,
+  normalizeMqttFrameFlags,
   type MqttDialDiagnostic,
 } from "../src/index.js";
 
@@ -28,7 +29,7 @@ const base: MqttDialDiagnostic = {
   socketErrorMessage: null,
   mqttPacketType: null,
   mqttReturnCode: null,
-  subProtocol: "mqttv3.1",
+  subProtocol: null,
   url: "wss://edge-chat.facebook.com/chat?region=hil&sid=123&cid=abc",
   handshakeHeaders: { origin: "[present]", cookie: "[REDACTED]" },
 };
@@ -122,10 +123,32 @@ describe("MQTT diagnostic security and URL validation", () => {
     expect(isValidMqttWsUrl("wss://edge-chat.facebook.com/chat\nX- evil: 1")).toBe(false);
   });
 
-  it("reports the negotiated sub-protocol and dialed URL in the diagnostic", () => {
+  it("reports the dialed URL without inventing a sub-protocol", () => {
     const line = formatMqttDiagnostic(base);
-    expect(line).toContain("subProtocol=mqttv3.1");
     expect(line).toContain("url=wss://edge-chat.facebook.com/chat");
+    expect(line).not.toContain("subProtocol=");
+  });
+
+  it("normalizes invalid PUBACK flags before the parser sees them", () => {
+    // [0x42 (PUBACK + bad flags), length 2, msgId 0x00 0x01]
+    const frame = new Uint8Array([0x42, 0x02, 0x00, 0x01]);
+    normalizeMqttFrameFlags(frame);
+    expect([...frame]).toEqual([0x40, 0x02, 0x00, 0x01]);
+  });
+
+  it("normalizes every PUBACK in a multi-frame buffer and leaves other packets alone", () => {
+    // PUBACK(bad) + CONNACK(0x20, flags 0, length 2) + PUBLISH(0x30, flags 0)
+    const frames = new Uint8Array([0x42, 0x02, 0x00, 0x01, 0x20, 0x02, 0x00, 0x00, 0x30, 0x02, 0x00, 0x02]);
+    normalizeMqttFrameFlags(frames);
+    expect(frames[0]).toBe(0x40);
+    expect(frames[4]).toBe(0x20);
+    expect(frames[8]).toBe(0x30);
+  });
+
+  it("works on an ArrayBuffer in place", () => {
+    const buffer = new Uint8Array([0x45, 0x02, 0x00, 0x07]).buffer;
+    normalizeMqttFrameFlags(buffer);
+    expect([...new Uint8Array(buffer)]).toEqual([0x40, 0x02, 0x00, 0x07]);
   });
 
   it("keeps the observed puback parser warning as a warning, not a disconnect", () => {

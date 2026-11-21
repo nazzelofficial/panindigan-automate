@@ -404,7 +404,17 @@ export function resolveConfig(options: ClientOptions = {}): ResolvedConfig {
     logTransports,
     httpTimeout: validated.httpTimeout ?? DEFAULTS.httpTimeout,
     httpRetries: validated.httpRetries ?? DEFAULTS.httpRetries,
-    httpMaxRedirects: validated.httpMaxRedirects ?? DEFAULTS.httpMaxRedirects,
+    // Facebook's login GET legitimately hops through several locale/edge
+    // redirects. A Render deployment had PANINDIGAN_HTTP_MAX_REDIRECTS=5,
+    // which made a working session fail with "Redirect limit (5) exceeded".
+    // Values below 10 are clamped to the known-safe minimum; 0 remains a
+    // valid explicit "do not follow redirects" choice.
+    httpMaxRedirects:
+      validated.httpMaxRedirects === undefined
+        ? DEFAULTS.httpMaxRedirects
+        : validated.httpMaxRedirects === 0
+          ? 0
+          : Math.max(validated.httpMaxRedirects, DEFAULTS.httpMaxRedirects),
     httpProxy: validated.httpProxy ?? null,
     userAgent: validated.userAgent ?? DEFAULTS.userAgent,
     heartbeatInterval: validated.heartbeatInterval ?? DEFAULTS.heartbeatInterval,
