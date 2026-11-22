@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { createRootLogger } from "../src/logger/index.js";
 import { MemoryStorage } from "../src/storage/index.js";
 import { StealthGuard, DEFAULT_STEALTH_CONFIG, AntiDetectionManager } from "../src/stealth/index.js";
+import { humanTypingDelay, typingIndicatorDuration } from "../src/stealth/anti-detection.js";
 import type { SuspensionSignal } from "../src/stealth/index.js";
 import { TokenBucket } from "../src/stealth/rate-limiter.js";
 
@@ -123,6 +124,118 @@ function signal(severity: SuspensionSignal["severity"], message = "sig"): Suspen
     context: {},
   };
 }
+
+describe("advanced anti-detection timing", () => {
+  it("scales compose delay with message length and stays bounded", () => {
+    const short = humanTypingDelay(5);
+    const long = humanTypingDelay(300);
+    expect(short).toBeGreaterThanOrEqual(80);
+    expect(long).toBeGreaterThanOrEqual(80);
+    expect(long).toBeLessThanOrEqual(4_000);
+    // Average over several samples to absorb the random noise.
+    const avg = (n: number): number => {
+      let sum = 0;
+      for (let i = 0; i < 20; i += 1) sum += humanTypingDelay(n);
+      return sum / 20;
+    };
+    expect(avg(300)).toBeGreaterThan(avg(5));
+  });
+
+  it("typing indicator duration is shorter than compose time and capped", () => {
+    expect(typingIndicatorDuration(300)).toBeLessThanOrEqual(2_500);
+    expect(typingIndicatorDuration(10)).toBeGreaterThanOrEqual(150);
+  });
+
+  it("uses the canonical userAgent from config in the fingerprint", () => {
+    const ua = "Mozilla/5.0 (Test) Chrome/149.0.0.0";
+    const manager = new AntiDetectionManager({ enabled: true, userAgent: ua }, logger);
+    expect(manager.getFingerprint().userAgent).toBe(ua);
+    manager.destroy();
+  });
+
+  it("injects a longer pause after a burst of sends", () => {
+    const manager = new AntiDetectionManager({
+      enabled: true,
+      typingRhythm: false,
+      timingJitterMs: [0, 0],
+      burstPauseCount: 3,
+      burstPauseMs: 5_000,
+    }, logger);
+    const delays = [manager.computeHumanDelay(10), manager.computeHumanDelay(10), manager.computeHumanDelay(10)];
+    // The third send in the burst crosses the threshold and adds the pause.
+    expect(Math.max(...delays)).toBeGreaterThanOrEqual(5_000);
+    manager.destroy();
+  });
+
+  it("produces zero delay when anti-detection is disabled", () => {
+    const manager = new AntiDetectionManager({ enabled: false }, logger);
+    expect(manager.computeHumanDelay(200)).toBe(0);
+    manager.destroy();
+  });
+});
+
+describe("StealthGuard — delay-based anti-spam", () => {
+  it("adds no delay below the threshold, then escalates", () => {
+    const { guard } = makeGuard({
+      pacingEnabled: true,
+      antiSpamThreshold: 2,
+      antiSpamBaseDelayMs: 100,
+      antiSpamMaxDelayMs: 1000,
+      antiSpamWindowMs: 60_000,
+      antiSpamPerThread: false,
+    });
+    // The gate computes the delay from PRIOR sends, then records the send.
+    // With threshold 2: first two sends are instant; the third sees 2 prior
+    // sends (still at threshold) and the fourth sees 3 (escalation kicks in).
+    expect(guard.getAntiSpamDelay()).toBe(0);
+    guard.recordSend();
+    expect(guard.getAntiSpamDelay()).toBe(0);
+    guard.recordSend();
+    expect(guard.getAntiSpamDelay()).toBe(0);
+    guard.recordSend();
+    expect(guard.getAntiSpamDelay()).toBeGreaterThan(0);
+  });
+
+  it("caps the escalation at antiSpamMaxDelayMs", () => {
+    const { guard } = makeGuard({
+      pacingEnabled: true,
+      antiSpamThreshold: 0,
+      antiSpamBaseDelayMs: 5000,
+      antiSpamMaxDelayMs: 300,
+      antiSpamPerThread: false,
+    });
+    for (let i = 0; i < 12; i += 1) guard.recordSend();
+    // ±25% jitter, so assert a generous upper bound around the 300ms cap.
+    expect(guard.getAntiSpamDelay()).toBeLessThanOrEqual(375);
+  });
+
+  it("never delays when the guard is disabled", () => {
+    const { guard } = makeGuard({ enabled: false, pacingEnabled: true });
+    for (let i = 0; i < 10; i += 1) guard.recordSend();
+    expect(guard.getAntiSpamDelay()).toBe(0);
+    expect(guard.getPacingDelay()).toBe(0);
+  });
+
+  it("tracks per-thread windows independently", () => {
+    const { guard } = makeGuard({
+      pacingEnabled: true,
+      antiSpamThreshold: 1,
+      antiSpamBaseDelayMs: 100,
+      antiSpamMaxDelayMs: 2000,
+      antiSpamWindowMs: 60_000,
+      antiSpamPerThread: true,
+    });
+    // One send in "a" — still at threshold, no delay.
+    guard.recordSend("a");
+    expect(guard.getAntiSpamDelay("a")).toBe(0);
+    // Two more in "a" exceed threshold for that thread.
+    guard.recordSend("a");
+    guard.recordSend("a");
+    expect(guard.getAntiSpamDelay("a")).toBeGreaterThan(0);
+    // "b" has its own window and is still quiet.
+    expect(guard.getAntiSpamDelay("b")).toBeGreaterThanOrEqual(0);
+  });
+});
 
 describe("StealthGuard — caps and rate limits", () => {
   it("allows operations inside the per-thread cap and rejects beyond it", () => {

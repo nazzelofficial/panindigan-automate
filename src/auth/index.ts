@@ -113,6 +113,32 @@ function normalizeSameSite(value: string | undefined): "strict" | "lax" | "none"
   }
 }
 
+/**
+ * Canonicalizes a Facebook cookie domain so mobile exports work.
+ *
+ * Mobile browsers export session cookies scoped to `m.facebook.com` (often
+ * host-only). Every request this library makes targets `www.facebook.com`,
+ * so a host-only `m.facebook.com` cookie is never sent — the session looks
+ * unauthenticated and Facebook rate-limits it. Map every `*.facebook.com`
+ * subdomain (m., touch., mbasic., web., www.) to the registrable domain
+ * `facebook.com` with hostOnly disabled, so the cookie is sent to every
+ * Facebook host the client uses.
+ */
+export function normalizeCookieDomain(domain: string | undefined): {
+  domain: string;
+  hostOnly: boolean;
+} {
+  const raw = (domain ?? "").trim().toLowerCase().replace(/^\.+/, "");
+  if (raw === "") return { domain: FB_COOKIE_DOMAIN, hostOnly: false };
+  // Any Facebook subdomain is normalized to the canonical domain so mobile
+  // and desktop exports behave identically. Non-Facebook domains (messenger,
+  // third-party) are left intact.
+  if (raw === "facebook.com" || raw.endsWith(".facebook.com")) {
+    return { domain: FB_COOKIE_DOMAIN, hostOnly: false };
+  }
+  return { domain: raw, hostOnly: false };
+}
+
 /** Parses an expiry into epoch ms, or `null` for session cookies. */
 function normalizeExpiry(
   expires: string | undefined,
@@ -136,13 +162,14 @@ function normalizeExpiry(
 
 /** Builds a normalized cookie from an AppState-style entry. */
 function fromAppStateEntry(entry: z.infer<typeof appStateEntrySchema>): NormalizedCookie {
+  const normalized = normalizeCookieDomain(entry.domain);
   return {
     name: entry.key,
     value: entry.value,
-    domain: entry.domain ?? FB_COOKIE_DOMAIN,
+    domain: normalized.domain,
     path: entry.path ?? "/",
     expiresAtMs: normalizeExpiry(entry.expires, entry.expirationDate),
-    hostOnly: entry.hostOnly ?? false,
+    hostOnly: normalized.hostOnly,
     httpOnly: entry.httpOnly ?? false,
     secure: entry.secure ?? true,
     sameSite: normalizeSameSite(entry.sameSite),
@@ -159,13 +186,14 @@ function fromCookieEntry(entry: z.infer<typeof cookieEntrySchema>): NormalizedCo
   } else if (entry.expires !== undefined) {
     expiresAtMs = normalizeExpiry(entry.expires, undefined);
   }
+  const normalized = normalizeCookieDomain(entry.domain);
   return {
     name: entry.name,
     value: entry.value,
-    domain: entry.domain ?? FB_COOKIE_DOMAIN,
+    domain: normalized.domain,
     path: entry.path ?? "/",
     expiresAtMs,
-    hostOnly: false,
+    hostOnly: normalized.hostOnly,
     httpOnly: entry.httpOnly ?? false,
     secure: entry.secure ?? true,
     sameSite: normalizeSameSite(entry.sameSite),
@@ -252,13 +280,14 @@ function parseStructured(value: unknown, sourceDescription: string): readonly No
           });
           continue;
         }
+        const normalized = normalizeCookieDomain(rawEntry.domain);
         cookies.push({
           name,
           value: rawEntry.value,
-          domain: rawEntry.domain ?? FB_COOKIE_DOMAIN,
+          domain: normalized.domain,
           path: rawEntry.path ?? "/",
           expiresAtMs: normalizeExpiry(rawEntry.expires, rawEntry.expirationDate),
-          hostOnly: rawEntry.hostOnly ?? false,
+          hostOnly: normalized.hostOnly,
           httpOnly: rawEntry.httpOnly ?? false,
           secure: rawEntry.secure ?? true,
           sameSite: normalizeSameSite(rawEntry.sameSite),

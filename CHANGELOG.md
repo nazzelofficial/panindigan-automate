@@ -2,6 +2,30 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.5] - 2026-11-22
+
+Patch release: mobile cookie support, reliable mutation APIs, delay-based anti-spam, and advanced stealth controls.
+
+### Added
+
+- **Delay-based anti-spam.** Outbound operations are now rate-shaped by a sliding window (`antiSpamWindowMs`, `antiSpamThreshold`, `antiSpamBaseDelayMs`, `antiSpamMaxDelayMs`, `antiSpamPerThread`). Beyond the threshold the wait escalates exponentially with ±25% jitter, tracked globally and per thread. Added `getAntiSpamDelay()` / `recordSend()` and wired them into the outbound gate alongside the existing pacing jitter. Documented in README before the Stealth Guard section.
+- **Advanced anti-detection timing.** `humanTypingDelay()` models compose time as an approximately-normal distribution scaled by message length; `typingIndicatorDuration()` derives a shorter value for typing indicators. A burst-pause rhythm injects a longer rest after rapid sends (`burstPauseCount`, `burstPauseMs`). These replace the old separate flat jitter call to avoid double-delay.
+- **Consistent browser identity.** The canonical config `userAgent` is now passed to the fingerprint, so HTTP headers, MQTT handshake, and client hints report the same browser. Previously the fingerprint generated a random older Chrome UA while requests sent a newer one. Override with `stealth: { antiDetection: { userAgent: "..." } }`.
+- **Modern convenience API.** Added methods and aliases that map to existing verified endpoints — `getCurrentUserId()`, `setMessageReaction`, `setTitle`, `changeThreadEmoji`, `changeThreadColor`, `changeArchivedStatus`, `sendTypingIndicator`, `getThreadHistory`, `getFriendsList`, `searchForThread`, `deleteMessage`, `uploadAttachment`, `resolvePhotoUrl`, `forwardAttachment`, `markAsReadAll`, `markAsUnread`, and `getAppState()`. No new protocol claims were invented; APIs with no verifiable endpoint (invite links) remain `NotImplementedError`.
+
+### Fixed
+
+- **`stealth: { enabled: false }` is now a complete off-switch.** Previously pacing (~1200ms per send), the anti-spam delay, and the halt circuit still ran. Now a disabled guard adds no delay, and `recordSignal()` / `forceHalt()` do not open the circuit (signals are still logged for diagnostics). `pacingEnabled: false` alone is no longer required.
+- Anti-detection can be disabled independently with `stealth: { antiDetection: false }` without turning off the guard's anti-spam.
+- **Mutation endpoints no longer fail on an empty success body.** Facebook replies with an empty body to `/messaging/send/` on success (add/remove participant, group settings, unsend). The HTTP check now treats an empty body as success and still throws on a non-empty malformed body or an error envelope — this was why `addParticipant` and similar methods raised "non-JSON response" even when Facebook accepted them.
+- **`sendVoiceMessage()` now uploads with the real `voice_clip` flag.** Previously the flag was sent on *every* upload (mislabelling images/files as audio) while the voice method never set it. Voice uploads now set it; normal uploads do not.
+- **`generateTheme()` no longer claims "AI-powered".** It is a local keyword→preset matcher with a hash fallback; the doc comment now says so honestly.
+- **Mobile `m.facebook.com` cookies now work.** Mobile exports scope `c_user`/`xs`/`datr` to `m.facebook.com` (often host-only), but every request targets `www.facebook.com` — so those cookies were never sent, making the session look unauthenticated and get rate-limited. All `*.facebook.com` subdomains are now canonicalized to `facebook.com` at parse time with `hostOnly` disabled, so mobile and desktop exports behave identically.
+
+### Notes
+
+- Anti-detection remains timing/consistency shaping only — no claim of evading checkpoints or any "anti-ban" guarantee; no local code can guarantee a platform will not restrict an account.
+
 ## [0.3.4] - 2026-11-21
 
 Patch release: fixes profile links resolving to the wrong account.

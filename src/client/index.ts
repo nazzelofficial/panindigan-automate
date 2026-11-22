@@ -107,6 +107,7 @@ import type {
   AttachmentType,
   ClientOptions,
   Credentials,
+  AppStateCookie,
   DiagnosticsHandle,
   EventListener,
   EventName,
@@ -617,12 +618,16 @@ export class MessengerClient {
     this.#updateOptions = options.update;
 
     // Initialize Anti-Detection Manager
-    const antiDetectConfig = typeof options.stealth?.antiDetection === "object" 
-      ? options.stealth.antiDetection 
-      : options.stealth?.antiDetection === false 
-        ? { enabled: false } 
+    const antiDetectBase = typeof options.stealth?.antiDetection === "object"
+      ? options.stealth.antiDetection
+      : options.stealth?.antiDetection === false
+        ? { enabled: false }
         : { enabled: true };
-    
+    // One browser identity across HTTP, MQTT, and client hints. The config
+    // userAgent is the canonical value — pass it so the fingerprint cannot
+    // disagree with the headers actually sent on the wire.
+    const antiDetectConfig = { ...antiDetectBase, userAgent: this.#config.userAgent };
+
     this.#antiDetect = new AntiDetectionManager(antiDetectConfig, this.#logger);
 
     this.#stealth = new StealthGuard({
@@ -2097,30 +2102,31 @@ export class MessengerClient {
     assertFileInput(audioFile);
     const targetThreadId = parseThreadId(threadId);
     
-    // Upload audio file first
-    const info = await this.#upload(audioFile);
-    
-    // Send as attachment with voice message flag
-    return this.#send(targetThreadId, { 
-      type: "attachment", 
-      attachmentId: info.attachmentId 
+    // Upload with the real voice_clip flag so Facebook renders it as a voice
+    // message bubble rather than a plain file attachment.
+    const info = await this.#upload(audioFile, { voiceClip: true });
+
+    return this.#send(targetThreadId, {
+      type: "attachment",
+      attachmentId: info.attachmentId,
     });
   }
 
   /**
-   * Generates a custom theme from a text prompt using AI-powered color generation.
-   * Returns a theme object with gradient and emoji.
-   * 
+   * Picks a theme from a local keyword→preset map based on a text prompt.
+   * This is NOT AI or a network call — it is deterministic local matching
+   * with a hash-based fallback. See `applyTheme()` to apply the result.
+   *
    * @param prompt - Text description (e.g., "sunset beach", "cyberpunk neon")
-   * @returns Theme object with gradient and emoji
+   * @returns A local theme suggestion `{ gradient, emoji, name }`
    */
   async generateTheme(prompt: string): Promise<{ gradient: string; emoji: string; name: string }> {
     if (typeof prompt !== "string" || prompt.trim().length === 0) {
       throw new ValidationError("prompt must be a non-empty string");
     }
 
-    // AI-powered theme generation logic
-    // This is a sophisticated color generation algorithm based on prompt analysis
+    // Local keyword matching only — no model, no network. The fallback hashes
+    // the prompt into one of the preset gradients so the result is stable.
     const normalized = prompt.toLowerCase().trim();
     
     // Theme generation mapping
@@ -2620,6 +2626,135 @@ export class MessengerClient {
   }
 
   // -------------------------------------------------------------------------
+  // Modern convenience API
+  //
+  // All methods below map to endpoints EXACTLY like the ones above — they are
+  // aliases/companions, not new protocol claims. Anything without a real,
+  // verifiable endpoint stays unimplemented (see createInviteLink).
+  // -------------------------------------------------------------------------
+
+  /** The authenticated account's numeric ID (from the session). */
+  getCurrentUserId(): string {
+    return this.getSession().userId;
+  }
+
+  /** Alias of `addReaction` — set a reaction on a message. */
+  async setMessageReaction(messageId: string, reaction: Reaction): Promise<void> {
+    return this.addReaction(messageId, reaction);
+  }
+
+  /** Alias of `changeGroupName`. */
+  async setTitle(threadId: string, title: string): Promise<void> {
+    return this.changeGroupName(threadId, title);
+  }
+
+  /** Alias of `changeGroupEmoji`. */
+  async changeThreadEmoji(threadId: string, emoji: string): Promise<void> {
+    return this.changeGroupEmoji(threadId, emoji);
+  }
+
+  /** Alias of `changeGroupTheme`. Note: accepts a theme name or numeric theme id, not hex. */
+  async changeThreadColor(threadId: string, color: string): Promise<void> {
+    return this.changeGroupTheme(threadId, color);
+  }
+
+  /** Alias of `archiveThread` / `unarchiveThread`. */
+  async changeArchivedStatus(threadId: string, archived: boolean): Promise<void> {
+    return archived ? this.archiveThread(threadId) : this.unarchiveThread(threadId);
+  }
+
+  /** Alias of `sendTypingIndicator`. */
+  async sendTypingIndicator(threadId: string, isTyping: boolean = true): Promise<void> {
+    return this.setTyping(threadId, isTyping);
+  }
+
+  /** Alias of `getMessages`. */
+  async getThreadHistory(threadId: string, options?: MessageListOptions | undefined): Promise<MessageListResult> {
+    return this.getMessages(threadId, options);
+  }
+
+  /** Alias of `getFriendList`. */
+  async getFriendsList(): Promise<readonly UserInfo[]> {
+    return this.getFriendList();
+  }
+
+  /** Alias of `searchThreads`. */
+  async searchForThread(query: string): Promise<readonly ThreadInfo[]> {
+    return this.searchThreads(query);
+  }
+
+  /** Alias of `unsendMessage`. */
+  async deleteMessage(messageId: string): Promise<void> {
+    return this.unsendMessage(messageId);
+  }
+
+  /** Alias of `uploadMedia`. */
+  async uploadAttachment(file: FileInput): Promise<UploadResult> {
+    return this.uploadMedia(file);
+  }
+
+  /** Resolves a photo attachment id to a downloadable URL. */
+  async resolvePhotoUrl(attachmentId: string): Promise<string> {
+    return this.#resolveAttachmentUrl(attachmentId);
+  }
+
+  /** Forwards an attachment id directly to a thread (same real endpoint as forwardMessage). */
+  async forwardAttachment(attachmentId: string, targetThreadIds: string | readonly string[]): Promise<void> {
+    const targets = (Array.isArray(targetThreadIds) ? targetThreadIds : [targetThreadIds]).map((t) => parseThreadId(t));
+    const gate = await this.#gateOutbound("sendMessage", targets[0], { pace: true, summary: { operation: "forwardAttachment" } });
+    if (gate.dryRun) return;
+    const timestamp = Math.floor(Date.now() / 1000);
+    try {
+      for (const [index, target] of targets.entries()) {
+        const form: Record<string, FormValue> = { attachment_id: parseMessageId(attachmentId) };
+        form[`recipient_map[${timestamp + index}]`] = target;
+        const json = await this.#postForm("forwardAttachment", `${FB_BASE_URL}/mercury/attachments/forward/`, form);
+        const payload = asRecord(asRecord(json)?.["payload"]);
+        if (payload !== null && payload["success"] === false) {
+          throw new APIError("Facebook rejected the attachment forward", "API_ERROR", {
+            retryable: false,
+            context: { attachmentId, target },
+          });
+        }
+      }
+    } finally {
+      this.#completeOutbound("sendMessage", targets[0] ?? undefined, true);
+    }
+  }
+
+  /** Marks every inbox thread as read using the real /mark_thread MQTT topic. */
+  async markAsReadAll(limit: number = 50): Promise<number> {
+    const { threads } = await this.getThreadList({ limit: Math.min(Math.max(1, limit), 100) });
+    const mqtt = this.#requireMqtt();
+    let marked = 0;
+    for (const thread of threads) {
+      await mqtt.publish(
+        TOPIC_MARK_THREAD,
+        JSON.stringify({ threadID: thread.id, mark: "read", state: true }),
+        { qos: 1, retain: false },
+      );
+      marked += 1;
+    }
+    return marked;
+  }
+
+  /** Marks a thread as unread using the same real /mark_thread topic. */
+  async markAsUnread(threadId: string): Promise<void> {
+    const id = parseThreadId(threadId);
+    const mqtt = this.#requireMqtt();
+    await mqtt.publish(
+      TOPIC_MARK_THREAD,
+      JSON.stringify({ threadID: id, mark: "read", state: false }),
+      { qos: 1, retain: false },
+    );
+  }
+
+  /** Returns the serialized session cookie jar (equivalent to fca getAppState). */
+  getAppState(): readonly AppStateCookie[] {
+    return this.#session.cookies.toAppState();
+  }
+
+  // -------------------------------------------------------------------------
   // Internals: transports and login
   // -------------------------------------------------------------------------
 
@@ -2700,11 +2835,21 @@ export class MessengerClient {
       );
     }
     if (opts.pace !== false) {
-      const delay = this.#stealth.getPacingDelay();
+      // Combine random pacing, adaptive anti-spam delay, and the advanced
+      // human-like compose rhythm (length-aware, with burst pauses).
+      const pacing = this.#stealth.getPacingDelay();
+      const antiSpam = this.#stealth.getAntiSpamDelay(target);
+      const bytes = opts.summary?.["bytes"];
+      const messageLength = typeof bytes === "number" ? bytes : 0;
+      const human = this.#antiDetect.computeHumanDelay(messageLength);
+      const delay = pacing + antiSpam + human;
       if (delay > 0) {
         await sleep(delay);
       }
     }
+    // Count this send toward the anti-spam sliding window (only for ops that
+    // actually hit the network — dry-run returned above).
+    this.#stealth.recordSend(target);
     return { dryRun: false };
   }
 
@@ -3395,10 +3540,10 @@ export class MessengerClient {
         replyTo: replyToMessageId ?? null,
       },
     });
-    
-    // Apply anti-detection timing jitter before send
-    await this.#antiDetect.applyJitter();
-    
+
+    // Timing jitter is now part of the outbound gate (computeHumanDelay),
+    // so no separate jitter call here — that double-applied the delay.
+
     if (gate.dryRun) {
       return {
         messageId: `dryrun_${randomUUID().slice(0, 8)}`,
@@ -3492,8 +3637,8 @@ export class MessengerClient {
     }
   }
 
-  async #upload(file: FileInput): Promise<MediaInfo> {
-    const info = await uploadMedia(this.#requireHttp(), this.#logger, file);
+  async #upload(file: FileInput, options?: { readonly voiceClip?: boolean | undefined }): Promise<MediaInfo> {
+    const info = await uploadMedia(this.#requireHttp(), this.#logger, file, options);
     this.#mediaCache.set(info.attachmentId, info);
     await this.#cache.set(`media:${info.attachmentId}`, info, {
       ttlSeconds: CACHE_TTL_SECONDS.user,

@@ -344,6 +344,18 @@ Pretty logging is **always on** in production: an old `PANINDIGAN_PRETTY_PRINT=f
 
 Two larger option objects deserve their own sections: [`stealth`](#stealth-guard-on-by-default) (on by default) and [`e2ee`](#e2ee-end-to-end-encryption-experimental) (off by default) — plus `dryRun: true` for a no-network rehearsal.
 
+## Delay-based anti-spam (on by default)
+
+Every mutating outbound operation passes through a real rate-shaping gate. It is not a cosmetic toggle — the delay is computed from actual send history:
+
+- **Sliding window** (`antiSpamWindowMs`, default 60s): recent sends are tracked globally and per thread.
+- **Threshold** (`antiSpamThreshold`, default 5): the first N sends in the window are not delayed.
+- **Escalating delay**: beyond the threshold the wait grows exponentially — `antiSpamBaseDelayMs × 2^(excess-1)` — capped at `antiSpamMaxDelayMs` (default 10s), with ±25% jitter so the cadence is not fixed.
+- **Independent per-thread windows** (`antiSpamPerThread`, default true): a busy thread does not slow down a quiet one, and vice versa.
+- **Combined with pacing**: the anti-spam delay is added on top of the existing random `basePacingMs` jitter.
+
+This sits alongside the token-bucket limits, hourly/daily caps, and the suspension-signal circuit breaker described below. To disable all of it for a bot account: `stealth: { enabled: false, pacingEnabled: false }` — a single `enabled: false` now fully disables pacing, anti-spam, caps, and the halt circuit (signals are still logged for diagnostics, but no action is taken).
+
 ## Stealth Guard (on by default)
 
 The guard stops the bot from behaving in ways that trip restriction systems, and stops the bot safely when risk signals appear.
@@ -388,11 +400,13 @@ await client.stealth.reset();
 
 Enabled by default since 0.2.0; opt out with `stealth: { antiDetection: false }`. What it actually does:
 
-- **Randomized pre-send delay** — a uniform 50–200ms delay is applied before every outbound mutating operation.
+- **Human-like compose timing** — the pre-send delay now scales with message length and follows an approximately-normal distribution (`humanTypingDelay`): most messages land near a median, a few take noticeably longer. A `typingIndicatorDuration()` helper returns a shorter duration suitable for showing a typing indicator before a reply. Configurable with `typingRhythm` (default true).
+- **Burst-pause rhythm** — after `burstPauseCount` rapid sends (default 10 within 5s), a longer natural pause (`burstPauseMs`, default 2s) is injected. Configurable.
 - **Staggered subscription timing** on MQTT connect (subscription order randomization and per-topic delays) via `MqttObfuscationManager`.
-- **Fingerprint API** — `client.getAntiDetectionFingerprint()` / `client.getHardwareDeviceId()` return a SHA-256 hash of the machine's CPU model, core count, primary MAC address, and hostname, formatted as a UUID. The hash is used **nowhere on the wire**; the connected client's UA and headers are unchanged.
+- **One consistent browser identity** — the canonical `userAgent` from config is now used for the fingerprint, HTTP headers, and MQTT handshake together (`antiDetection.userAgent`). Previously the fingerprint generated a random Chrome 120–124 UA while requests sent Chrome 149 — a mismatch across layers. You can override it with `stealth: { antiDetection: { userAgent: "..." } }`.
+- **Fingerprint API** — `client.getAntiDetectionFingerprint()` / `client.getHardwareDeviceId()` return a SHA-256 hash of the machine's CPU model, core count, primary MAC address, and hostname, formatted as a UUID. The hash is used **nowhere on the wire**.
 
-What it does **not** do: it does not rotate the User-Agent your requests send, it does not evade checkpoints or any Facebook anti-abuse mechanism, and its effect on restriction rates has not been measured. It is randomized timing plus a cosmetic fingerprint getter, not evasion technology — claims like "indistinguishable from human behavior" you may have seen elsewhere in marketing copy were removed as unprovable.
+What it does **not** do: it does not evade checkpoints, verify identities, or bypass any Facebook security control. Its effect on restriction rates has **not been measured** — these are timing/consistency mechanisms, not evasion technology. Claims like "indistinguishable from human behavior" or "anti-ban" are not made; no local code can guarantee a platform will not restrict an account.
 
 ## E2EE (End-to-End Encryption, experimental)
 

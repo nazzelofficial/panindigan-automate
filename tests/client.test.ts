@@ -83,6 +83,27 @@ describe("MessengerClient construction", () => {
   });
 });
 
+describe("modern convenience API", () => {
+  it("exposes all the new aliases as functions without login", () => {
+    const client = new MessengerClient({ storageAdapter: "memory", persistSession: false, logLevel: "silent" });
+    for (const method of [
+      "getCurrentUserId", "setMessageReaction", "setTitle", "changeThreadEmoji",
+      "changeThreadColor", "changeArchivedStatus", "sendTypingIndicator",
+      "getThreadHistory", "getFriendsList", "searchForThread", "deleteMessage",
+      "uploadAttachment", "resolvePhotoUrl", "forwardAttachment",
+      "markAsReadAll", "markAsUnread", "getAppState",
+    ] as const) {
+      expect(typeof (client as any)[method]).toBe("function");
+    }
+  });
+
+  it("keeps invite-link APIs honestly unimplemented", async () => {
+    const client = new MessengerClient({ storageAdapter: "memory", persistSession: false, logLevel: "silent" });
+    await expect(client.createInviteLink("123")).rejects.toThrow();
+    await expect(client.joinGroupByLink("x")).rejects.toThrow();
+  });
+});
+
 describe("profile URL resolution", () => {
   it("extracts an id from profile.php?id= and /users/ URLs", () => {
     expect(extractUserIdFromUrl("https://www.facebook.com/profile.php?id=123456789")).toBe("123456789");

@@ -50,6 +50,25 @@ export interface AntiDetectionConfig {
   readonly obfuscateRequests: boolean;
   /** Enable pattern diffusion. Default: true */
   readonly patternDiffusion: boolean;
+  /**
+   * Canonical User-Agent used on every layer. When set, the generated
+   * fingerprint uses this exact value so HTTP, MQTT and the client hints
+   * agree. When unset a random browser UA is generated (the old behavior,
+   * which produced mismatched identities across layers).
+   */
+  readonly userAgent?: string | undefined;
+  /**
+   * Simulate a human "typing then pause" rhythm before sending: delay scales
+   * with message length and follows a log-normal-like distribution rather
+   * than a flat jitter. Default: true.
+   */
+  readonly typingRhythm: boolean;
+  /**
+   * After this many rapid sends, inject a longer natural pause (ms).
+   * Default 10 sends → 2s pause. Set 0 to disable.
+   */
+  readonly burstPauseCount: number;
+  readonly burstPauseMs: number;
 }
 
 export const DEFAULT_ANTI_DETECTION_CONFIG: AntiDetectionConfig = {
@@ -58,6 +77,9 @@ export const DEFAULT_ANTI_DETECTION_CONFIG: AntiDetectionConfig = {
   timingJitterMs: [50, 200],
   obfuscateRequests: true,
   patternDiffusion: true,
+  typingRhythm: true,
+  burstPauseCount: 10,
+  burstPauseMs: 2_000,
 };
 
 /**
@@ -147,6 +169,28 @@ export function applyTimingJitter(config: AntiDetectionConfig): number {
 }
 
 /**
+ * Models the time a person spends composing a message of `length` characters.
+ * Uses a sum of uniform samples (central-limit → approximately normal) so most
+ * messages land near the median and a few take noticeably longer — closer to
+ * real typing behavior than a flat random range. Clamped to [80ms, 4000ms].
+ */
+export function humanTypingDelay(length: number): number {
+  const chars = Math.max(0, Math.min(length, 500));
+  const median = 250 + chars * 12; // ~250ms base + 12ms per character
+  const noise = (Math.random() + Math.random() + Math.random() - 1.5) * 0.6; // ±~0.9
+  const value = median * Math.max(0.25, 1 + noise);
+  return Math.round(Math.min(4_000, Math.max(80, value)));
+}
+
+/**
+ * Returns how long to display a typing indicator before a reply of `length`
+ * chars — slightly shorter than the compose delay, capped at 2.5s.
+ */
+export function typingIndicatorDuration(length: number): number {
+  return Math.round(Math.min(2_500, Math.max(150, humanTypingDelay(length) * 0.8)));
+}
+
+/**
  * Adds entropy to requests to make them unique and harder to fingerprint.
  */
 export function addEntropyToRequest(): string {
@@ -190,7 +234,9 @@ export class AntiDetectionManager {
   #generateFingerprint(): DeviceFingerprint {
     return {
       deviceId: this.#hardwareId,
-      userAgent: generateUserAgent(),
+      // Use the canonical UA from config when supplied so every layer reports
+      // the same browser identity. Otherwise fall back to a generated one.
+      userAgent: this.#config.userAgent ?? generateUserAgent(),
       platform: "Win32",
       generatedAt: Date.now(),
       hardwareId: this.#hardwareId,
@@ -229,6 +275,38 @@ export class AntiDetectionManager {
     const delayMs = applyTimingJitter(this.#config);
     this.#logger?.debug({ delayMs }, "Anti-detection pre-send jitter applied");
     await new Promise(resolve => setTimeout(resolve, delayMs));
+  }
+
+  /** Rolling counter for burst-pause rhythm. */
+  #recentSends = 0;
+  #lastSendAt = 0;
+
+  /**
+   * Computes the pre-send delay: a human-like compose time based on message
+   * length, plus an occasional longer pause after a rapid burst of sends.
+   * Pure computation — the caller decides whether to sleep.
+   */
+  computeHumanDelay(messageLength: number): number {
+    if (!this.#config.enabled) return 0;
+    let delay = 0;
+    if (this.#config.typingRhythm) {
+      delay += humanTypingDelay(messageLength);
+    } else {
+      delay += applyTimingJitter(this.#config);
+    }
+    // Burst pause: after N sends within a short window, inject a longer rest.
+    const now = Date.now();
+    if (this.#config.burstPauseCount > 0) {
+      if (now - this.#lastSendAt < 5_000) this.#recentSends += 1;
+      else this.#recentSends = 1;
+      this.#lastSendAt = now;
+      if (this.#recentSends >= this.#config.burstPauseCount) {
+        delay += this.#config.burstPauseMs;
+        this.#recentSends = 0;
+        this.#logger?.debug({ burstPauseMs: this.#config.burstPauseMs }, "Anti-detection burst pause injected");
+      }
+    }
+    return Math.round(delay);
   }
 
   /** Generates obfuscated request headers */

@@ -73,6 +73,16 @@ export interface StealthConfig {
   readonly jitterPercent: number;
   /** Apply randomized pacing before outbound ops. Default true. */
   readonly pacingEnabled: boolean;
+  /** Delay-based anti-spam: escalating delay as sends pile up in a window. */
+  readonly antiSpamWindowMs: number;
+  /** Base delay (ms) applied once sends exceed `antiSpamThreshold`. */
+  readonly antiSpamBaseDelayMs: number;
+  /** Upper bound for the escalating delay. */
+  readonly antiSpamMaxDelayMs: number;
+  /** Sends allowed inside the window before delays escalate. */
+  readonly antiSpamThreshold: number;
+  /** Track per-thread sends in addition to the global window. Default true. */
+  readonly antiSpamPerThread: boolean;
   /** Sliding-window caps (A4). */
   readonly caps: StealthCaps;
   /** Pacing multiplier applied once a cap warning is active. Default 2. */
@@ -127,6 +137,11 @@ export const DEFAULT_STEALTH_CONFIG: StealthConfig = {
   basePacingMs: 1200,
   jitterPercent: 0.5,
   pacingEnabled: true,
+  antiSpamWindowMs: 60_000,
+  antiSpamBaseDelayMs: 600,
+  antiSpamMaxDelayMs: 10_000,
+  antiSpamThreshold: 5,
+  antiSpamPerThread: true,
   capWarningDelayMultiplier: 2,
   caps: {
     perThreadPerHour: 30,
@@ -166,6 +181,9 @@ export class StealthGuard {
   readonly #threadCaps = new Map<string, SlidingWindowCap>();
   /** Rolling 2h window of successful outbound sends (G2 risk forecast). */
   readonly #sendTimestamps: number[] = [];
+  /** Short-window send timestamps for delay-based anti-spam (global + per-thread). */
+  readonly #spamWindow: number[] = [];
+  readonly #threadSpamWindows = new Map<string, number[]>();
   #riskRiseNotifiedAt = 0;
 
   #callbacks: StealthGuardCallbacks = {};
@@ -397,6 +415,15 @@ export class StealthGuard {
 
   /** Record a suspension signal; may open the circuit. */
   async recordSignal(signal: SuspensionSignal): Promise<void> {
+    // A disabled guard never halts the account — still log the signal for
+    // diagnostics, but do not accumulate it or open the circuit.
+    if (!this.#config.enabled) {
+      this.#logger.warn(
+        { signal: signal.type, severity: signal.severity },
+        "Suspension signal detected (stealth guard disabled — no action taken)",
+      );
+      return;
+    }
     const now = Date.now();
     const signals = [
       ...this.#state.signals.filter((s) => now - s.timestamp < this.#config.signalWindow),
@@ -424,6 +451,10 @@ export class StealthGuard {
 
   /** Force the circuit open. Used by the checkpoint realtime guard (A9). */
   async forceHalt(reason: string): Promise<void> {
+    if (!this.#config.enabled) {
+      this.#logger.warn({ reason }, "forceHalt ignored — stealth guard is disabled");
+      return;
+    }
     await this.#halt(reason);
   }
 
@@ -458,9 +489,54 @@ export class StealthGuard {
     return true;
   }
 
+  /**
+   * Delay-based anti-spam. Returns how long the caller should wait before a
+   * send, based on how many sends already happened in the sliding window.
+   * The first `antiSpamThreshold` sends are instant; beyond that the delay
+   * escalates exponentially up to `antiSpamMaxDelayMs`. This is distinct from
+   * the random pacing jitter — it is a real rate-shaping mechanism.
+   */
+  getAntiSpamDelay(target?: string): number {
+    if (!this.#config.enabled || !this.#config.pacingEnabled) return 0;
+    const now = Date.now();
+    const window = this.#config.antiSpamWindowMs;
+    const trim = (arr: number[]): void => {
+      while (arr.length > 0 && now - (arr[0] ?? 0) > window) arr.shift();
+    };
+    trim(this.#spamWindow);
+    const globalCount = this.#spamWindow.length;
+    let threadCount = 0;
+    if (this.#config.antiSpamPerThread && target !== undefined) {
+      const t = this.#threadSpamWindows.get(target) ?? [];
+      trim(t);
+      threadCount = t.length;
+    }
+    const excess = Math.max(0, Math.max(globalCount, threadCount) - this.#config.antiSpamThreshold);
+    if (excess === 0) return 0;
+    // 2^(excess-1) escalation, capped, with ±25% jitter to avoid a fixed cadence.
+    const raw = this.#config.antiSpamBaseDelayMs * 2 ** (excess - 1);
+    const capped = Math.min(raw, this.#config.antiSpamMaxDelayMs);
+    return Math.max(1, Math.round(capped * (0.75 + Math.random() * 0.5)));
+  }
+
+  /** Records a send as having happened, for the anti-spam sliding window. */
+  recordSend(target?: string): void {
+    if (!this.#config.enabled) return;
+    const now = Date.now();
+    this.#spamWindow.push(now);
+    if (this.#config.antiSpamPerThread && target !== undefined) {
+      const arr = this.#threadSpamWindows.get(target) ?? [];
+      arr.push(now);
+      this.#threadSpamWindows.set(target, arr);
+    }
+  }
+
   /** Randomized inter-operation delay with jitter, scaled by cap warnings. */
   getPacingDelay(): number {
-    if (!this.#config.pacingEnabled) {
+    // A fully disabled guard must not add any delay. Previously only
+    // pacingEnabled was checked, so `stealth: {enabled:false}` still added
+    // ~1200ms to every outbound operation.
+    if (!this.#config.enabled || !this.#config.pacingEnabled) {
       return 0;
     }
     const base = this.#config.basePacingMs * this.#capDelayMultiplier();

@@ -153,17 +153,25 @@ interface UploadAttempt {
   readonly error: unknown;
 }
 
+/** Builds the multipart fields for an upload; voice_clip only for voice. */
+export function buildUploadFields(voiceClip: boolean): Record<string, string> {
+  return voiceClip ? { voice_clip: "true" } : {};
+}
+
 async function attemptUpload(
   http: HttpTransport,
   url: string,
   field: string,
   contents: FileContents,
+  voiceClip: boolean = false,
 ): Promise<UploadAttempt> {
   try {
     const response = await http.postMultipart(
       "uploadMedia",
       url,
-      { voice_clip: "true" },
+      // voice_clip is ONLY for actual voice messages. Sending it on every
+      // image/file upload mislabels them as audio clips.
+      buildUploadFields(voiceClip),
       { field, filename: contents.filename, content: contents.content, contentType: contents.contentType ?? undefined },
     );
     const payload = http.check("uploadMedia", response, { allowNon200: true });
@@ -189,15 +197,17 @@ export async function uploadMedia(
   http: HttpTransport,
   logger: Logger,
   input: FileInput,
+  options?: { readonly voiceClip?: boolean | undefined },
 ): Promise<MediaInfo> {
   const contents = await readFileInput(input);
+  const voiceClip = options?.voiceClip === true;
 
-  const primary = await attemptUpload(http, UPLOAD_URL, "farr", contents);
+  const primary = await attemptUpload(http, UPLOAD_URL, "farr", contents, voiceClip);
   if (primary.info !== null) {
     return primary.info;
   }
 
-  const fallback = await attemptUpload(http, UPLOAD_FALLBACK_URL, "upload_1024", contents);
+  const fallback = await attemptUpload(http, UPLOAD_FALLBACK_URL, "upload_1024", contents, voiceClip);
   if (fallback.info !== null) {
     logger.debug({ host: "upload.facebook.com" }, "media upload succeeded on the fallback host");
     return fallback.info;

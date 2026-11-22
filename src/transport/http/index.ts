@@ -642,7 +642,11 @@ export class HttpTransport {
    * accepts a non-200 response whose body still parses (Facebook's upload
    * endpoint does this).
    */
-  check(operation: string, response: HttpResponse, options?: { readonly allowNon200?: boolean | undefined }): unknown {
+  check(
+    operation: string,
+    response: HttpResponse,
+    options?: { readonly allowNon200?: boolean | undefined; readonly allowEmptyBody?: boolean | undefined },
+  ): unknown {
     if (response.url.includes("/login")) {
       throw new AuthenticationError(
         `Session is no longer valid — "${operation}" was redirected to the login page`,
@@ -654,6 +658,14 @@ export class HttpTransport {
       throw this.#apiErrorFromStatus(operation, response);
     }
     if (response.json === null) {
+      // An EMPTY body is the normal success reply for mutation endpoints like
+      // /messaging/send/ (add/remove participant, presence, group settings).
+      // A NON-EMPTY body that fails to parse is a real malformed response.
+      // Distinguish the two: empty means success, garbage means error.
+      const bodyEmpty = response.body === "" || response.body.trim() === "";
+      if (bodyEmpty || options?.allowEmptyBody === true) {
+        return null;
+      }
       throw new APIError(
         `"${operation}" returned a non-JSON response (status ${response.status})`,
         "API_ERROR",

@@ -3,8 +3,50 @@ import {
   computeJazoest,
   interpretFacebookError,
   parseFacebookJson,
+  HttpTransport,
 } from "../src/transport/http/index.js";
 import { APIError, PermissionError } from "../src/errors/index.js";
+import { resolveConfig } from "../src/config/index.js";
+import { CookieStore } from "../src/auth/index.js";
+import { MiddlewareManager } from "../src/middleware/index.js";
+import { DiagnosticsCollector } from "../src/diagnostics/index.js";
+import { createRootLogger } from "../src/logger/index.js";
+
+function makeTransport(): HttpTransport {
+  return new HttpTransport({
+    config: resolveConfig({ storageAdapter: "memory", persistSession: false }),
+    cookies: CookieStore.fromCookies([]),
+    middleware: new MiddlewareManager(),
+    diagnostics: new DiagnosticsCollector(),
+    logger: createRootLogger({ level: "silent", prettyPrint: false, logFile: null, transports: [] }),
+  });
+}
+
+const emptyResponse = (overrides: Partial<{ status: number; url: string; body: string; json: unknown }> = {}) => ({
+  status: 200,
+  url: "https://www.facebook.com/messaging/send/",
+  headers: {} as Record<string, string>,
+  body: "",
+  json: null,
+  ...overrides,
+});
+
+describe("HttpTransport.check — mutation empty-body handling", () => {
+  it("treats an empty body as success (fixes addParticipant/unsend/group mutations)", () => {
+    const http = makeTransport();
+    expect(http.check("addParticipant", emptyResponse())).toBeNull();
+  });
+
+  it("still throws on a non-empty malformed body", () => {
+    const http = makeTransport();
+    expect(() => http.check("addParticipant", emptyResponse({ body: "<html>checkpoint</html>" }))).toThrow(APIError);
+  });
+
+  it("still throws on an error envelope in JSON", () => {
+    const http = makeTransport();
+    expect(() => http.check("addParticipant", emptyResponse({ body: '{"error":1357004}', json: { error: 1357004 } }))).toThrow();
+  });
+});
 
 describe("parseFacebookJson", () => {
   it("parses a single JSON document", () => {

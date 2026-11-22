@@ -33,6 +33,35 @@ const base = () => [
 ];
 
 describe("cookie export compatibility", () => {
+  it("sends m.facebook.com host-only session cookies to www.facebook.com", async () => {
+    // Mobile browsers export c_user/xs/datr scoped to m.facebook.com and
+    // host-only. All library requests go to www.facebook.com, so without
+    // domain canonicalization these are never sent — the session looks
+    // unauthenticated and Facebook rate-limits it.
+    const cookies = await parseCredentials([
+      { key: "c_user", value: "61596880191204", domain: "m.facebook.com", path: "/", hostOnly: true, expirationDate: future },
+      { key: "xs", value: "mobile-xs", domain: "m.facebook.com", path: "/", hostOnly: true, expirationDate: future },
+      { key: "datr", value: "mobile-datr", domain: ".m.facebook.com", path: "/", expirationDate: future },
+    ]);
+    const store = CookieStore.fromCookies(cookies);
+    const header = store.headerFor("https://www.facebook.com/");
+    expect(header).toContain("c_user=61596880191204");
+    expect(header).toContain("xs=mobile-xs");
+    expect(header).toContain("datr=mobile-datr");
+    expect(store.requireAuthenticated()).toBe("61596880191204");
+  });
+
+  it("sends name/value-array mobile cookies (hostOnly discarded) to www", async () => {
+    const cookies = await parseCredentials([
+      { name: "c_user", value: "61596880191204", domain: "m.facebook.com", path: "/", hostOnly: true, expirationDate: future },
+      { name: "xs", value: "v", domain: "m.facebook.com", path: "/", expirationDate: future },
+      { name: "datr", value: "v", domain: "m.facebook.com", path: "/", expirationDate: future },
+    ]);
+    const store = CookieStore.fromCookies(cookies);
+    expect(store.headerFor("https://www.facebook.com/")).toContain("c_user=61596880191204");
+    expect(store.requireAuthenticated()).toBe("61596880191204");
+  });
+
   it("accepts a host-only dbln on the canonical facebook.com domain (10/10)", async () => {
     // tough-cookie silently drops a host-only `facebook.com` cookie that is
     // stored through `https://www.facebook.com/`. The old urlForCookie() check
