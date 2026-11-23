@@ -168,11 +168,18 @@ export function extractUserIdFromHtml(body: string, viewerId?: string): string |
   const skip = viewerId !== undefined ? new Set([String(viewerId)]) : new Set<string>();
   const candidates: string[] = [];
   for (const pattern of [
-    /"profile_id"\s*:\s*"(\d{12,20})"/,
-    /"target_id"\s*:\s*"(\d{12,20})"/,
-    /"profile_id"\s*:\s*(\d{12,20})/,
-    /"target_id"\s*:\s*(\d{12,20})/,
-    /"profileId"\s*:\s*"(\d{12,20})"/,
+    // Fields a real profile page uses for the PROFILE OWNER. The viewer id
+    // (`user_id`) is deliberately NOT here — see the doc comment above.
+    /"profile_id"\s*:\s*"?(\d{12,20})"?/,
+    /"target_id"\s*:\s*"?(\d{12,20})"?/,
+    /"profileId"\s*:\s*"?(\d{12,20})"?/,
+    /"userID"\s*:\s*"?(\d{12,20})"?/,
+    /"entity_id"\s*:\s*"?(\d{12,20})"?/,
+    /"pageID"\s*:\s*"?(\d{12,20})"?/,
+    /"userId"\s*:\s*"?(\d{12,20})"?/,
+    // fb:// deep links on profile pages carry the owner's numeric id.
+    /fb:\/\/profile\/(?:id=)?(\d{12,20})/,
+    /fb:\/\/user\/(?:id=)?(\d{12,20})/,
     // og:url / canonical meta tags on a share page point at the target profile.
     /<meta[^>]+(?:property|name)=["']og:url["'][^>]+content=["']https?:\/\/(?:www\.)?facebook\.com\/(\d{12,20})/i,
     /<link[^>]+rel=["']canonical["'][^>]+href=["']https?:\/\/(?:www\.)?facebook\.com\/(\d{12,20})/i,
@@ -183,6 +190,19 @@ export function extractUserIdFromHtml(body: string, viewerId?: string): string |
     if (match?.[1]) candidates.push(match[1]);
   }
   return candidates.find((id) => !skip.has(id)) ?? null;
+}
+
+/** Extracts a vanity/username segment from a resolved Facebook profile URL. */
+function extractVanityFromUrl(url: string): string | null {
+  try {
+    const pathname = new URL(url).pathname.replace(/\/+$/, "");
+    const segment = pathname.split("/").pop() ?? "";
+    if (segment === "" || /^\d+$/.test(segment)) return null;
+    if (["profile.php", "share", "users", "user", "people", "home.php"].includes(segment)) return null;
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
 }
 
 /** How long `login()` waits for the first sync payload before failing. */
@@ -2338,6 +2358,26 @@ export class MessengerClient {
     // Exclude our own id — a share page contains the viewer id, which is us.
     const fromBody = extractUserIdFromHtml(response.body, this.#session.userId);
     if (fromBody !== null) return fromBody;
+
+    // 3) Vanity URLs (facebook.com/<username>) often render client-side with
+    // no extractable id in the raw HTML. Use Facebook's own typeahead search
+    // on the vanity segment — the same real endpoint searchUsers() uses — and
+    // accept a match only when the username/vanity matches exactly.
+    const vanity = extractVanityFromUrl(response.url);
+    if (vanity !== null) {
+      try {
+        const matches = await this.searchUsers(vanity);
+        const normalizedVanity = vanity.toLowerCase().replace(/[^a-z0-9]/g, "");
+        const exact = matches.find((match) => {
+          const nameMatch = match.name?.toLowerCase().replace(/[^a-z0-9]/g, "") === normalizedVanity;
+          const urlMatch = match.profileUrl?.toLowerCase().includes(`/${normalizedVanity}`) === true;
+          return nameMatch || urlMatch;
+        });
+        if (exact !== undefined) return exact.id;
+      } catch {
+        // Typeahead is best-effort; fall through to the honest error.
+      }
+    }
 
     throw new APIError(`could not resolve a user ID from "${value}"`, "API_ERROR", {
       retryable: false,

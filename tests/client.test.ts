@@ -124,6 +124,15 @@ describe("profile URL resolution", () => {
     expect(extractUserIdFromHtml(body)).toBe("123456789012345");
   });
 
+  it("extracts an id from real profile-page fields (userID, entity_id, fb://)", () => {
+    expect(extractUserIdFromHtml('{"userID":"123456789012345"}')).toBe("123456789012345");
+    expect(extractUserIdFromHtml('{"entity_id":123456789012345}')).toBe("123456789012345");
+    expect(extractUserIdFromHtml('<a href="fb://profile/123456789012345">')).toBe("123456789012345");
+    // The viewer id is still excluded even when it appears in userID.
+    expect(extractUserIdFromHtml('{"userID":"61596880191204","profile_id":"123456789012345"}', "61596880191204"))
+      .toBe("123456789012345");
+  });
+
   it("returns null rather than the bot's own id when that is the only id present", () => {
     const body = '{"user_id":"61596880191204","name":"Viewer"}';
     expect(extractUserIdFromHtml(body, "61596880191204")).toBeNull();

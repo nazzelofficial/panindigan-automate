@@ -364,18 +364,18 @@ What it does, all wired into every mutating operation (send/edit/unsend/forward,
 
 - **Signal detection** — restriction codes and messages across HTTP, GraphQL, and the MQTT control plane (`1357004`, checkpoints, `429`, abuse flags, messaging limits, session death, …). Chat content never triggers the detector.
 - **Circuit breaker** — repeated halting signals (default: 3 in 10 minutes) freeze the bot; every proactive send rejects with `AccountRestrictedError` (code `ACCOUNT_RESTRICTED`); the account stays frozen until a human runs `client.stealth.reset()` after the cooldown (default 24h).
-- **Caps** — 30 messages/thread/hour, 100/hour, 200/day, configurable. Crossing 80% doubles pacing; at 100% proactive sends stop until the window resets.
-- **Token buckets** — per-operation burst + sustained refill, plus a max of 5 in-flight calls per operation+target.
-- **Warmup** — fresh sessions ramp from 30% to 100% over 7 days.
+- **Caps** — non-binding by default (no practical throughput limit). They exist as an opt-in guardrail: set `caps` lower if you want per-thread/hour/day ceilings.
+- **Token buckets** — non-binding by default; configurable via `limits` if you want a hard rate. A max of 5 in-flight calls per operation+target still applies to prevent pile-ups.
+- **Warmup** — over 7 days a fresh session's pacing eases from cautious to normal. Warmup shapes the inter-send delay (anti-detection), not throughput — day 0 does not reduce how many messages you can send.
 - **Pacing** — randomized inter-operation delays; never metronomic.
 - **Guard audit log** — the last 200 guard decisions, exported via diagnostics.
 
 ```ts
 const client = new MessengerClient({
   stealth: {
-    // everything optional; sensible strict defaults:
+    // everything optional; caps are non-binding by default:
     enabled: true,
-    caps: { perThreadPerHour: 30, globalPerHour: 100, globalPerDay: 200 },
+    // caps: { perThreadPerHour: 30, globalPerHour: 100, globalPerDay: 200 }, // opt-in hard cap
     signalThreshold: 3,
     cooldownMs: 24 * 60 * 60 * 1000,
     // pace: false to disable pacing jitter

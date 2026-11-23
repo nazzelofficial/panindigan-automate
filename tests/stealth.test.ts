@@ -350,6 +350,23 @@ describe("StealthGuard — warmup", () => {
     expect(warming.getWarmupMultiplier()).toBeLessThan(1);
     expect(warming.getWarmupMultiplier()).toBeGreaterThanOrEqual(0.3);
   });
+
+  it("does NOT throttle the hard send rate on warmup day zero", () => {
+    // A fresh session (warmupDay 0) must still allow the configured 30/hour.
+    // Previously the token bucket was multiplied by 0.3, cutting it to 9/hour.
+    const { guard } = makeGuard({
+      warmupEnabled: true,
+      warmupDays: 7,
+      pacingEnabled: false,
+      limits: { sendMessage: { burst: 3, sustained: 3, refillRate: 3 / 3600 } },
+    });
+    expect(guard.checkOperation("sendMessage").allowed).toBe(true);
+    guard.checkOperation("sendMessage"); // consumes a token
+    guard.checkOperation("sendMessage"); // consumes a token
+    // With a burst of 3, exactly 3 sends are allowed; the 4th is denied.
+    const fourth = guard.checkOperation("sendMessage");
+    expect(fourth.allowed).toBe(false);
+  });
 });
 
 describe("StealthGuard — persistence", () => {

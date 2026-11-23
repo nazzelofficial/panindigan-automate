@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.6] - 2026-11-23
+
+Patch release: vanity-link resolution, a non-throttling warmup, and correct command throughput.
+
+### Fixed
+
+- **Vanity profile links now resolve to a numeric ID.** `resolveProfileId()` reads the profile-owner fields real profile pages use (`userID`, `entity_id`, `fb://profile/<id>`, canonical meta) instead of only `profile_id`/`target_id`. For client-rendered vanity pages with no id in the HTML, it falls back to Facebook's own typeahead search on the vanity name and accepts an exact match. The viewer's own id is still excluded.
+- **Warmup day 0 no longer throttles sends.** The token bucket and hard caps are non-binding by default (effectively no throughput limit). Warmup now shapes pacing delays only — a fresh session sends more cautiously and eases to normal over 7 days — so anti-detection timing stays strong without capping how many messages the bot can send. Set `caps`/`limits` lower in `stealth` options if you want a hard cap.
+
 ## [0.3.5] - 2026-11-22
 
 Patch release: mobile cookie support, reliable mutation APIs, delay-based anti-spam, and advanced stealth controls.

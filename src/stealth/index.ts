@@ -143,16 +143,19 @@ export const DEFAULT_STEALTH_CONFIG: StealthConfig = {
   antiSpamThreshold: 5,
   antiSpamPerThread: true,
   capWarningDelayMultiplier: 2,
+  // Hard throughput caps are intentionally non-binding. The guard protects
+  // the account through timing (pacing + warmup), not by throttling how many
+  // messages the bot may send. Set these lower only if you want a hard cap.
   caps: {
-    perThreadPerHour: 30,
-    globalPerHour: 100,
-    globalPerDay: 200,
+    perThreadPerHour: 1_000_000,
+    globalPerHour: 1_000_000,
+    globalPerDay: 10_000_000,
   },
   limits: {
-    sendMessage: { burst: 10, sustained: 30, refillRate: 30 / 3600 },
-    addReaction: { burst: 20, sustained: 100, refillRate: 100 / 3600 },
-    createGroup: { burst: 2, sustained: 5, refillRate: 5 / 3600 },
-    global: { burst: 50, sustained: 200, refillRate: 200 / 3600 },
+    sendMessage: { burst: 1_000_000, sustained: 1_000_000, refillRate: 1_000_000 / 3600 },
+    addReaction: { burst: 1_000_000, sustained: 1_000_000, refillRate: 1_000_000 / 3600 },
+    createGroup: { burst: 1_000_000, sustained: 1_000_000, refillRate: 1_000_000 / 3600 },
+    global: { burst: 1_000_000, sustained: 1_000_000, refillRate: 1_000_000 / 3600 },
   },
   antiDetection: true
 };
@@ -539,7 +542,11 @@ export class StealthGuard {
     if (!this.#config.enabled || !this.#config.pacingEnabled) {
       return 0;
     }
-    const base = this.#config.basePacingMs * this.#capDelayMultiplier();
+    // A fresh session (warmup 0.3) paces MORE conservatively (÷0.3 ≈ 3.3×),
+    // then eases to normal as the 7-day warmup completes. Throughput stays at
+    // the configured 30/hour — warmup only shapes the inter-send delay.
+    const warmup = this.getWarmupMultiplier();
+    const base = (this.#config.basePacingMs * this.#capDelayMultiplier()) / Math.max(0.1, warmup);
     const jitter = this.#config.jitterPercent * base * Math.random();
     const sign = Math.random() < 0.5 ? -1 : 1;
     return Math.max(1, Math.round(base + sign * jitter));
@@ -596,8 +603,12 @@ export class StealthGuard {
     let bucket = this.#buckets.get(operation);
     if (bucket === undefined) {
       const limit = this.#limitFor(operation);
-      const warmup = this.getWarmupMultiplier();
-      bucket = new TokenBucket(Math.max(1, Math.ceil(limit.burst * warmup)), (limit.refillRate * warmup));
+      // The hard rate stays at the configured value (sendMessage = 30/hour)
+      // on every warmup day. Previously the bucket was multiplied by the 0.3
+      // day-zero warmup factor, cutting a usable 30/hour down to 9/hour and
+      // making a fresh session feel crippled. Warmup now shapes PACING delays
+      // (anti-detection), not the hard throughput limit.
+      bucket = new TokenBucket(Math.max(1, limit.burst), limit.refillRate);
       this.#buckets.set(operation, bucket);
     }
     return bucket;
